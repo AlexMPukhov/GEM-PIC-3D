@@ -1,0 +1,54 @@
+# Dense electron bunch overtaken by a plane-wave CO2 laser pulse at a small angle.
+#   laser: lambda = 10 um, a0 = 5, 0.1 rad to the bunch axis, infinite transverse size, Gaussian envelope
+#   bunch: 160 pC, gamma = 50, sigma = 10 um x 10 um x 10 um
+# The laser is an analytic external field (exact plane wave, not on the grid); the grid carries the
+# self-fields of the bunch and its radiation, which act back on it (grid-resolved radiation reaction).
+# Reference run without the laser, ending on the same plane:
+#   build/gempic3d examples/oblique_plane_wave.deck laser.enabled=false output.dir=ref
+# Compare <pz> (column 12 of diag.txt) of both runs at the last line.
+
+grid {
+  lambda0       = 10 um
+  nx            = 256          # transverse: Fourier modes, periodic box with an absorbing sponge
+  ny            = 128
+  Lx            = 640 um       # the bunch drifts towards the laser axis (x); the window follows it
+  Ly            = 320 um
+  sponge        = 60 um
+  sponge_rate   = 0.1
+  nzeta         = 1601         # dzeta = 0.25 um: 14 points per 3.5 um (on-axis resonance at the peak)
+  window_length = 400 um
+  dz            = 50 um        # field step along z (no Courant limit)
+  dz_push       = 50 um        # particle sub-steps are further limited to push_phase of laser phase
+  z_end         = 22 cm        # the pulse has passed (a_env < 1e-4) by about 20 cm for s and p
+}
+
+laser {
+  a0           = 5
+  wavelength   = 10 um
+  angle        = 0.1 rad       # between the laser k and the bunch axis z, in the x-z plane
+  polarization = s             # s: E along y (normal to the plane of incidence); p: E in the x-z plane
+  tau_fwhm     = 0.5 ps        # intensity FWHM. "length 2 ps" read as the full pulse; change here
+  start_fwhm   = 3.5           # the bunch starts 3.5 FWHM before the peak: A ~ 1e-6 a0 at start and end
+  stop_fwhm    = 0             # 0: run to z_end, so the reference run ends on the same plane
+}
+
+bunch {
+  charge           = 160 pC
+  gamma            = 50
+  sigma_x          = 10 um
+  sigma_z          = 10 um
+  zeta_center      = 330 um    # near the front: the bunch slips back in the window
+  macroparticles   = 400000
+  shot_noise       = fawley    # bunching noise of the real 1e9 electrons at noise_wavelength
+  noise_wavelength = 3.5 um
+  beamlet          = 4
+}
+
+numerics {
+  push_phase = 0.05            # rad of laser phase per RK4 sub-step; use 0.02 for p-polarization (gamma dips to ~2)
+}
+
+output {
+  dir   = oblique
+  every = 20
+}
