@@ -16,9 +16,11 @@ with the radiation of the bunch resolved on the grid and acting back on it
 
 ```
 make                      # build/gempic3d and build/tests (C++17, OpenMP, no external libraries)
-make test                 # 48 checks against analytic references, a few minutes on one core
+make test                 # 58 checks against analytic references, a few minutes on one core
 make MPI=1 BUILD=build-mpi                 # MPI (mpicxx); test: sh tests/mpi.sh build-mpi/gempic3d
 make CUDA=1 NVCC=nvcc CUDA_ARCH=-arch=sm_80 BUILD=build-gpu    # GPU (nvcc, cuFFT); add MPI=1 for both
+make EMU=1 BUILD=build-emu test emu-selftest   # the GPU code paths on the CPU (GPU emulator, see Parallelism)
+make FFTW=1 BUILD=build-fftw               # optional: FFTW 3 instead of the own FFT (CPU builds)
 build/gempic3d examples/oblique_plane_wave.deck --check            # summary and memory estimate
 build/gempic3d examples/oblique_plane_wave.deck                    # run, results in oblique/
 build/gempic3d examples/oblique_plane_wave.deck laser.enabled=false output.dir=ref   # reference
@@ -149,19 +151,37 @@ stores only its own slices (about 256 bytes per grid point). The transverse wind
 centroid of step k − `window_lag` (non-blocking reduction, also in serial runs). The coupling march(q+1) →
 push(q) → march(q) limits the speedup to about P/2; the main gain is the memory per rank.
 
+**FFT sizes.** `nx` and `ny` can be any size. The own FFT (`src/fft.hpp`) uses radix 2 for powers of two
+(unchanged), a self-sorting mixed-radix Stockham transform for sizes whose prime factors are ≤ 31, and
+Bluestein's algorithm otherwise; sizes of the form 2^a 3^b 5^c 7^d are the fast ones. `make FFTW=1` uses FFTW 3
+(with its OpenMP threads) instead; cuFFT on the GPU takes any size as well. The default stays free of external
+libraries.
+
+**GPU emulator** (`make EMU=1`, `src/emu/`). No CUDA emulator runs current CUDA with cuFFT at a usable speed
+(GPGPU-Sim, the closest, stops at CUDA 11, simulates cycles and has no cuFFT). The emulator therefore compiles the
+GPU code paths of the sources (GEMPIC_GPU = 1: device buffers, kernel launches through `par_for`, the per-mode
+march, cuFFT, device atomics) with the host compiler against a CPU stand-in for the CUDA runtime and cuFFT.
+Device memory is kept apart as on a GPU: every `cudaMalloc` is its own memory map, open only during a kernel,
+a copy, a memset or an FFT, and closed (PROT_NONE) otherwise, so host code that touches device memory stops with
+a backtrace. Kernel threads run in a scrambled order. `make EMU=1 emu-selftest` checks the emulator itself.
+Not covered: device code that reads host memory and the compile-time rules of nvcc; for the latter compile
+with the real nvcc (`sh tools/install_cuda_pip.sh` installs nvcc and cuFFT from PyPI without root rights).
+
 **Status.** `tests/mpi.sh`: 2, 3 and 4 ranks reproduce the single-rank run exactly (laser, dense bunch, Fawley
 noise, sponge, window shifts, block-edge crossings in a graded ζ grid), with Fourier y and with the free-hand y. The CUDA build (also with MPI) compiles with nvcc 13.4 for
 sm_80 but has not been run on a GPU yet: run `build-gpu/tests` and `tests/mpi.sh` there first. With several
-ranks on GPUs the particle exchange goes through host memory each step.
+ranks on GPUs the particle exchange goes through host memory each step. In the GPU emulator all tests and
+`tests/mpi.sh` pass, and nvcc 13.4 compiles the CUDA build for sm_80 (also with the free-hand grids); a run on a
+real GPU is still to be done.
 
 ## Input deck
 
 | block | key | default | meaning |
 |---|---|---|---|
 | grid | `lambda0` | laser wavelength | reference wavelength (code units) |
-| | `nx`, `Lx` | — | x: modes (a power of 2) and period |
+| | `nx`, `Lx` | — | x: modes (any size; 2^a 3^b 5^c 7^d are fast) and period |
 | | `y_grid` | fourier | `fourier`, or `table` for the free-hand y between walls |
-| | `ny`, `Ly` | —, `Lx` | Fourier y: modes (a power of 2) and period |
+| | `ny`, `Ly` | —, `Lx` | Fourier y: modes (any size) and period |
 | | `y_points`, `dy_points`, `y_max` | — | free-hand y: step `dy_points` at the distances `y_points` from the axis (linear between, constant beyond), mirrored; walls at ±`y_max` |
 | | `zeta_grid` | uniform | `uniform`, or `table` for the free-hand ζ |
 | | `nzeta` | — | uniform ζ: number of slices |
@@ -197,16 +217,17 @@ and `particles_end.txt` hold the macroparticles.
 
 | check | result |
 |---|---|
-| FFT: pair transforms against the direct DFT, round trip; batched 2D and x-only transforms | 1e-15; 1e-14 |
+| FFT: pair transforms against the direct DFT, round trip; sizes 6, 15, 37, 60, 97, 120 (mixed radix, Bluestein); batched 2D and x-only transforms, 16 × 8 and 12 × 10 | 1e-15; 2e-15; 1e-14 |
 | free-hand grids: inverse of the step mapping; eigenvectors of the y-Laplacian | 0; 1e-13 |
-| vacuum: ω of a forward wave tilted by 0.1 rad against ω = 2κk⊥²/(4κ² − k⊥²), amplitude over 40 steps; default grids, free-hand ζ (4:1), free-hand y | 0.35 % (32 points per λ), 4e-5, the same for all three |
+| vacuum: ω of a forward wave tilted by 0.1 rad against ω = 2κk⊥²/(4κ² − k⊥²), amplitude over 40 steps; default grids, free-hand ζ (4:1), free-hand y, 15 × 6 modes | 0.35 % (32 points per λ), 4e-5, the same for all four |
 | diffraction of a Gaussian beam (w0 = 10/k0) over 3 Rayleigh lengths, rms width against the phase of the reduced system: Fourier y; free-hand y at constant step; free-hand y 1 → 4 against constant step | 0.26 %; 0.7 %; 0.09 % |
 | one electron, a0 = 5, θ = 0.1, γ = 50, s- and p-polarized: h = γ − p·k̂ conserved; peak γ from h and p⊥ + qA; p after the pulse (Lawson–Woodward) | 1e-8 / 2e-6; 0.04 % / 0.06 %; 6e-8 / 2e-6 |
-| field of a long round Gaussian bunch against Gauss's law with the TSC widening σ² + Δ²/4: E_x, E_y, B_y at r = σ, 2σ, mean of 5 slices; default grids, free-hand y, free-hand ζ | ≤ 1.4 % (macroparticle noise) |
+| field of a long round Gaussian bunch against Gauss's law with the TSC widening σ² + Δ²/4: E_x, E_y, B_y at r = σ, 2σ, mean of 5 slices; default grids, free-hand y, free-hand ζ, 120 × 120 modes | ≤ 1.4 % (macroparticle noise) |
 | γ = 1000 bunch in its own field over 100 steps: ⟨γ⟩, field energy; default, and free-hand y and ζ | 3e-8, 0.1 %; 5e-8, 0.1 % |
 | dense γ = 50, 160 pC bunch with and without the sponge; Fourier y, free-hand y | 2e-7; 6e-7 |
 | constant-step ζ table against the uniform ζ grid, with Fourier y and with the free-hand y | bit for bit |
 | MPI, 2/3/4 ranks against 1 rank (`tests/mpi.sh`), Fourier y and free-hand y | identical |
+| all of the above in the GPU emulator (`make EMU=1 test`, `tests/mpi.sh build-emu-mpi/gempic3d`); FFTW build | pass; pass |
 
 With the default grids (Fourier y, uniform ζ) the code reproduces the previous version (commit cf3ee50)
 up to rounding, except in the sponge, whose bound field now includes the factor (1 + β) and the 1/γ²
@@ -235,5 +256,5 @@ At 2.5 FWHM the residual A ~ 10⁻³ a0, amplified by the cross term 2p⊥0·A/h
   in the x–z plane; use Fourier y when the bunch moves in y.
 - **Grid fields over a step.** The grid fields are frozen at level s0 during the particle step, as in
   GEM-PIC-RZ; the laser is exact. Halving `dz` checks this.
-- **Performance.** No FFTW option, checkpoints or HDF5/openPMD output yet; the GPU build is untested. The
+- **Performance.** No checkpoints or HDF5/openPMD output yet; the GPU build has run only in the emulator. The
   production deck needs about 13 GB in total (256 bytes per point), split over the MPI ranks.

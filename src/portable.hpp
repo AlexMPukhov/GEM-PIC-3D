@@ -12,6 +12,10 @@
 #include <cuda_runtime.h>
 #define HD __host__ __device__
 #define GEMPIC_GPU 1
+#elif defined(GEMPIC_EMU)
+#include "emu/cuda_runtime.h"      // GPU emulator on the CPU (make EMU=1): the GPU code paths, device memory apart
+#define HD
+#define GEMPIC_GPU 1
 #else
 #define HD
 #define GEMPIC_GPU 0
@@ -45,7 +49,14 @@ inline void gpu_check(int code, const char* what) {
 }
 
 // ---------------------------------------------------------------- kernels
-#if GEMPIC_GPU
+#if defined(GEMPIC_EMU)
+template <class F> inline void par_for(long n, F f) {
+    if (n <= 0) return;
+    gemu::launch(n, f);
+    gpu_check(cudaGetLastError(), "kernel launch");
+}
+inline void device_sync() { gpu_check(cudaDeviceSynchronize(), "synchronize"); }
+#elif GEMPIC_GPU
 template <class F> __global__ void gempic_kernel(long n, F f) {
     const long i = long(blockIdx.x) * blockDim.x + threadIdx.x;
     if (i < n) f(i);

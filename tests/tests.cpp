@@ -40,8 +40,8 @@ static int nearest(const std::vector<double>& v, double x) {
 
 // 1. FFT: pair transforms of two real fields and back; the batched transforms (2D for Fourier y, x only for
 //    the free-hand y) against FFT2 and FFT1, and their round trips.
-static void test_fft() {
-    const int nx = 16, ny = 8; FFT2 f(nx, ny);
+static void test_fft(int nx, int ny) {
+    FFT2 f(nx, ny);
     std::mt19937 r(3); std::uniform_real_distribution<double> U(-1, 1);
     std::vector<double> a(nx * ny), b(nx * ny), a2(nx * ny), b2(nx * ny);
     for (int i = 0; i < nx * ny; ++i) { a[i] = U(r); b[i] = U(r); }
@@ -50,10 +50,23 @@ static void test_fft() {
     std::complex<double> ref = 0;
     for (int ix_ = 0; ix_ < nx; ++ix_) for (int iy = 0; iy < ny; ++iy)
         ref += a[ix_ * ny + iy] * std::polar(1.0, -2 * M_PI * (3.0 * ix_ / nx + 5.0 * iy / ny));
-    close("fft: pair transform = direct DFT", std::abs(A[3 * ny + 5]), std::abs(ref), 1e-12);
+    if (nx != 16) { (void)ref; }
+    else close("fft: pair transform = direct DFT", std::abs(A[3 * ny + 5]), std::abs(ref), 1e-12);
     f.inverse_pair(A.data(), B.data(), a2.data(), b2.data());
     double e = 0; for (int i = 0; i < nx * ny; ++i) e = std::max(e, std::fabs(a2[i] - a[i]) + std::fabs(b2[i] - b[i]));
-    check(e < 1e-13, "fft: inverse pair restores both fields", e, 0, 1e-13);
+    if (nx == 16) check(e < 1e-13, "fft: inverse pair restores both fields", e, 0, 1e-13);
+    // any size: mixed radix and Bluestein against the direct DFT
+    double gen = 0;
+    for (int n : {6, 15, 37, 60, 97, 120}) {
+        FFT1 g(n);
+        std::vector<std::complex<double>> z(n), ref(n);
+        for (auto& v : z) v = {U(r), U(r)};
+        for (int k = 0; k < n; ++k)
+            for (int j = 0; j < n; ++j) ref[k] += z[j] * std::polar(1.0, -2 * M_PI * double((long(j) * k) % n) / n);
+        g.run(z.data(), false);
+        for (int k = 0; k < n; ++k) gen = std::max(gen, std::abs(z[k] - ref[k]));
+    }
+    if (nx == 16) check(gen < 1e-12, "fft: sizes 6, 15, 37, 60, 97, 120 = direct DFT", gen, 0, 1e-12);
     const int np = 5;
     std::vector<cpx> h(np * nx * ny);
     for (auto& v : h) v = C(U(r), U(r));
@@ -84,9 +97,10 @@ static void test_fft() {
         got = dbuf.host();
         double rt = 0;
         for (size_t i = 0; i < h.size(); ++i) rt = std::max(rt, std::fabs(got[i].re - h[i].re) + std::fabs(got[i].im - h[i].im));
-        check(err < 1e-12 && rt < 1e-13, two_d ? "fft: batched 2D transform = FFT2 plane by plane, round trip"
-                                               : "fft: batched x-transform = FFT1 row by row, round trip",
-              std::max(err, rt), 0, 1e-12);
+        char name[96];
+        std::snprintf(name, sizeof name, "fft: batched %s %dx%d, round trip", two_d ? "2D transform = FFT2" : "x-transform = FFT1",
+                      nx, ny);
+        check(err < 1e-12 && rt < 1e-13, name, std::max(err, rt), 0, 1e-12);
     }
 }
 
@@ -135,6 +149,7 @@ static void test_dispersion(const std::string& kind) {
         zc = 0.5 * (a2 + b1);
     }
     if (kind == "y") c.y_table({0}, {2.5}, 5);
+    if (kind == "sizes") { c = base(15, 6, 1025, 2 * M_PI / kx, 10, h * 1024); }
     c.self_fields = true; c.dz = 10; c.nmacro = 0;
     Simulation sim(c, comm);
     const int N = c.nzeta, nx = c.nx, ny = c.ny;
@@ -161,7 +176,8 @@ static void test_dispersion(const std::string& kind) {
     const std::complex<double> a1 = demod();
     const double om = -std::arg(a1 / a0) / (steps * c.dz);
     const double k2 = kx * kx, ref = 2 * kappa * k2 / (4 * kappa * kappa - k2);
-    const std::string tag = kind == "zeta" ? "vacuum (free-hand zeta): " : kind == "y" ? "vacuum (free-hand y): " : "vacuum: ";
+    const std::string tag = kind == "zeta" ? "vacuum (free-hand zeta): " : kind == "y" ? "vacuum (free-hand y): "
+                          : kind == "sizes" ? "vacuum (15 x 6 modes): " : "vacuum: ";
     close((tag + "omega of a tilted forward wave (0.1 rad)").c_str(), om, ref, 0.01);
     close((tag + "amplitude kept over 40 steps").c_str(), std::abs(a1), std::abs(a0), 2e-3);
 }
@@ -265,7 +281,7 @@ static void test_plane_wave(const std::string& pol) {
 //    that grows inside the bunch, and on a free-hand zeta grid with the transition at the measured slice.
 static void test_gauss(const std::string& kind) {
     const double sig = 6.0, sz = 60.0, Lw = 8 * sz;
-    Config c = base(128, 128, 129, 40 * sig, 40 * sig, Lw);
+    Config c = kind == "120 x 120 modes" ? base(120, 120, 129, 40 * sig, 40 * sig, Lw) : base(128, 128, 129, 40 * sig, 40 * sig, Lw);
     if (kind == "y") c.y_table({0, 4, 30}, {1.5, 1.5, 6}, 20 * sig);
     if (kind == "zeta") c.zeta_table({0, 200, 300}, {4, 4, 1.5}, Lw);
     c.gamma = 1000; c.sigx = c.sigy = sig; c.sigz = sz; c.charge = 1e-12; c.nmacro = 400000;
@@ -296,7 +312,7 @@ static void test_gauss(const std::string& kind) {
     const int jc = c.ny / 2, ic = c.nx / 2;
     std::vector<double> yh(c.ny);
     for (int j = 0; j < c.ny; ++j) yh[j] = c.y_fourier ? c.ynode[j] : 0.5 * (c.ynode[j] + c.ynode[j + 1]);   // E_y points
-    const std::string tag = "Gauss" + std::string(kind == "uniform" ? "" : " (free-hand " + kind + ")") + ": ";
+    const std::string tag = "Gauss" + std::string(kind == "uniform" ? "" : kind == "120 x 120 modes" ? " (" + kind + ")" : " (free-hand " + kind + ")") + ": ";
     for (double rr : {1.0, 2.0}) {
         const int k = int(std::lround(rr * sig / sim.dx));
         const double rg = k * sim.dx;
@@ -382,11 +398,13 @@ static void test_constant_tables(bool yfourier) {
 int main(int argc, char** argv) {
     comm.init(&argc, &argv);
     std::printf("GEM-PIC-3D tests (%s build)\n", GEMPIC_GPU ? "CUDA" : "CPU");
-    test_fft();
+    test_fft(16, 8);
+    test_fft(12, 10);
     test_grids();
     test_dispersion("default");
     test_dispersion("zeta");
     test_dispersion("y");
+    test_dispersion("sizes");
     test_diffraction("Fourier", 0);
     test_diffraction("free-hand 1 -> 4", test_diffraction("constant step", 0));
     test_plane_wave("s");
@@ -394,6 +412,7 @@ int main(int argc, char** argv) {
     test_gauss("uniform");
     test_gauss("y");
     test_gauss("zeta");
+    test_gauss("120 x 120 modes");
     test_equilibrium(false);
     test_equilibrium(true);
     test_sponge(false);

@@ -54,7 +54,7 @@ struct Config {
     // mirrored, walls at +-y_max rounded up to a whole cell; for zeta from the rear, window rounded up)
     void zeta_uniform(int n, double Lw);
     void zeta_table(const std::vector<double>& pts, const std::vector<double>& steps, double Lw);
-    void y_uniform(int n, double Ly_);                 // Fourier modes, n a power of 2
+    void y_uniform(int n, double Ly_);                 // Fourier modes
     void y_table(const std::vector<double>& pts, const std::vector<double>& steps, double ymax);
     double dzeta(int m) const { return zeta[m + 1] - zeta[m]; }
 };

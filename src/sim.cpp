@@ -40,8 +40,7 @@ void Config::zeta_table(const std::vector<double>& pts, const std::vector<double
     Lwin = zeta.back(); zeta_change = m.max_change();
 }
 void Config::y_uniform(int n, double Ly_) {
-    if (n < 4) throw std::runtime_error("grid: ny must be >= 4 (a power of 2)");
-    FFT1 check(n);                                    // throws unless n is a power of 2
+    if (n < 4) throw std::runtime_error("grid: ny must be >= 4");
     const double h = Ly_ / n;
     ny = n; ynode.resize(n + 1); y_fourier = true;
     for (int j = 0; j <= n; ++j) ynode[j] = (j - n / 2) * h;
@@ -74,7 +73,7 @@ Config Config::from_deck(const Deck& d) {
         return v;
     };
     c.nx = int(d.integer("grid", "nx", 0));
-    if (c.nx < 4) throw std::runtime_error("grid: nx must be >= 4 (a power of 2)");
+    if (c.nx < 4) throw std::runtime_error("grid: nx must be >= 4");
     c.Lx = L("grid", "Lx");
     const std::string yg = d.str("grid", "y_grid", "fourier");
     if (yg == "fourier") c.y_uniform(int(d.integer("grid", "ny", 0)), Ld("grid", "Ly", c.Lx));
