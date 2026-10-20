@@ -1,7 +1,7 @@
 # make                 CPU build with OpenMP (build/gempic3d, build/tests)
 # make MPI=1           with MPI (mpicxx)
 # make CUDA=1          GPU build with nvcc and cuFFT (NVCC=..., CUDA_ARCH=-arch=sm_80); combine with MPI=1
-SRC = src/deck.cpp src/sim.cpp src/comm.cpp
+SRC = src/deck.cpp src/grid.cpp src/sim.cpp src/comm.cpp
 HDR = $(wildcard src/*.hpp)
 BUILD ?= build
 ifeq ($(CUDA),1)

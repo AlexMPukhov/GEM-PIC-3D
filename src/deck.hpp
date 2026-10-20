@@ -4,6 +4,7 @@
 #include <map>
 #include <set>
 #include <string>
+#include <vector>
 
 enum class Kind { None, Length, Time, Charge, Angle };
 
@@ -19,6 +20,8 @@ public:
     double num(const std::string& b, const std::string& k, Kind kind) const;    // required, SI units
     double num(const std::string& b, const std::string& k, Kind kind, double def_si) const;
     long integer(const std::string& b, const std::string& k, long def) const;
+    // list of numbers, comma or blank separated, with one unit at the end: "0, 40, 400 um" (SI units)
+    std::vector<double> list(const std::string& b, const std::string& k, Kind kind) const;
     bool flag(const std::string& b, const std::string& k, bool def) const;
     void check_unused() const;                                                  // unknown keys are errors
     std::string file = "(deck)";

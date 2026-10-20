@@ -1,5 +1,7 @@
 // GEM-PIC-3D: Galilean electromagnetic PIC in three dimensions.
-// Transverse directions: Fourier modes (periodic box with absorbing sponge); longitudinal: zeta = z - t,
+// x: Fourier modes (periodic, absorbing sponge, window that follows the bunch). y: Fourier modes as well
+// (default), or optionally finite differences on a free-hand staggered grid between conducting walls
+// (absorbing sponge). zeta = z - t: uniform or free-hand slices,
 // marched from the front of the window to the rear; slow coordinate s = z (GT2 for the particles).
 // Units: c = 1, lengths 1/k0, times 1/omega0, momenta m c, fields m c omega0/e, densities n_c (of lambda0).
 //
@@ -14,15 +16,21 @@
 #include "comm.hpp"
 #include "deck.hpp"
 #include "fftmany.hpp"
+#include "grid.hpp"
 #include "portable.hpp"
 
 struct Config {
     double lambda0 = 0, Lu = 0, Tu = 0, nc = 0;       // reference wavelength [m], code length [m], code time [s], n_c [m^-3]
-    int nx = 0, ny = 0, nzeta = 0;
-    double Lx = 0, Ly = 0, Lwin = 0, h = 0;
+    int nx = 0, ny = 0, nzeta = 0;                    // ny: modes (Fourier) or cells between the walls (free-hand)
+    double Lx = 0, Ly = 0, Lwin = 0;                  // Ly: period (Fourier) or wall to wall (free-hand)
+    bool y_fourier = true;                            // y: Fourier modes (default) or the free-hand grid
+    std::vector<double> zeta;                         // slices, zeta[0] = 0 (rear) ... zeta[nzeta-1] = Lwin
+    std::vector<double> ynode;                        // y nodes (ny+1). Fourier: j*dy - Ly/2 at the start;
+                                                      // free-hand: ynode[0] = -Ly/2 and ynode[ny] = Ly/2 are the walls
+    double zeta_change = 0, y_change = 0;             // largest change of the step from one cell to the next
     double dz = 0, z_end = 0, dz_push = 0;
-    double sponge = 0, sponge_rate = 0.1;
-    bool move_x = true, move_y = true;
+    double sponge = 0, sponge_y = 0, sponge_rate = 0.1;
+    bool move_x = true, move_y = true;                // move_y: Fourier y only
     int window_lag = 4;                                // the window shift of step k uses the centroid of step k - lag
     bool self_fields = true, zeta_filter = true, k_filter = true;
     double push_phase = 0.05;
@@ -42,6 +50,13 @@ struct Config {
     static Config from_deck(const Deck& d);
     static Config base_units(double lambda0);          // units only (used by the tests)
     void summary(FILE* f, int ranks) const;
+    // grids (code units): uniform, or a free-hand step table (points >= 0; for y measured from the axis,
+    // mirrored, walls at +-y_max rounded up to a whole cell; for zeta from the rear, window rounded up)
+    void zeta_uniform(int n, double Lw);
+    void zeta_table(const std::vector<double>& pts, const std::vector<double>& steps, double Lw);
+    void y_uniform(int n, double Ly_);                 // Fourier modes, n a power of 2
+    void y_table(const std::vector<double>& pts, const std::vector<double>& steps, double ymax);
+    double dzeta(int m) const { return zeta[m + 1] - zeta[m]; }
 };
 
 // Plane-wave pulse of infinite transverse size: A = a0 g(eta) cos(kL (eta - eta_c) + cep) e_pol,
@@ -87,10 +102,12 @@ public:
     Config cfg;
     Comm& comm;
     Laser laser;
-    int N = 0, a = 0, b = 0, ns = 0, nk = 0;
-    double dx = 0, dy = 0, s = 0, X0 = 0, Y0 = 0;
+    int N = 0, a = 0, b = 0, ns = 0, nk = 0;          // nk = nx * ny points of a plane, index j*nx + ix
+    double dx = 0, dy = 0, s = 0, X0 = 0, Y0 = 0;     // dy, Y0: Fourier y only (free-hand y: Y0 = 0)
+    bool yf = true;                                    // cfg.y_fourier
     long istep = 0;
     double field_energy = 0, W_macro_ne = 0;
+    double beta_b = 1, gm2_b = 0;           // mean beta of the bunch at the start, 1 - beta^2 (bound field of the sponge)
 
     // device arrays of nk-point planes: slice planes l = n - a (0..ns-1); half-cell planes hk = m - (a-1)
     // (0..ns); unfiltered current planes hw = m - (a-2) (0..ns+2); real-field planes fl = n - a (0..ns+1:
@@ -98,10 +115,24 @@ public:
     Buf<cpx> Rx, Ry, Ez, Bz, Lx, Ly;        // ns planes
     Buf<cpx> bnd;                           // slice b of level s1 from the rank above: Rx Ry Ez Bz Lx Ly
     Buf<cpx> j0x, j0y, jkx, jky, jkz;       // filtered spectra of the half-cell currents, levels s0 and s1
+    Buf<cpx> jzg;                           // filtered j_z of the half-cells a-2 and b (from the neighbours)
     Buf<double> jw;                         // unfiltered deposit, 3 components x (ns+3) planes
     Buf<float> F;                           // E, B in real space: F[(c*(ns+2) + fl)*nk + i]
     Buf<cpx> S1, S2;                        // FFT scratch, ns+1 planes each
-    Buf<double> kxd, kyd, kxs, kys, filt, mask;
+    Buf<cpx> sRx, sRy, sLx, sLy, srhs;      // march scratch of the free-hand y: one plane (a y-line per k_x)
+    Buf<double> scp;
+    // x: k_x per ix (Nyquist zeroed for derivatives), k_x for the window shift, current filter, sponge
+    Buf<double> kxd, kxs, filt, maskx;
+    // Fourier y: the same per iy (kyd, kys, filty); masky_n = masky_h is the sponge, evl = kyd^2, iD = iA = 1/dy.
+    // Free-hand y: node positions (ny+1), 1/Delta_j of the half-cell j between nodes j and j+1, 1/A_j of the dual
+    // cell of node j (between the half-nodes j-1/2 and j+1/2), sponge profiles on nodes and half-nodes, the LU
+    // factors of k_x^2 - Lap_y on the nodes (bound field), the eigenvectors of -Lap_y (co-moving field)
+    Buf<double> kyd, kys, filty;
+    Buf<double> yn, iD, iA, masky_n, masky_h, pcp, pid, evf, evb, evl;
+    // zeta: slices, half-cell lengths (guarded: hcg[m+2]), the weights of the half-cells below and above a slice
+    Buf<double> zs, hcg, wlo, whi, wsl;
+    Axis zax, yax;
+    std::vector<double> hDel, hA;           // host copies of Delta_j, A_j
     Buf<Particle> parts;
     long np = 0;                            // particles in `parts`
     long lost_total = 0;
@@ -126,5 +157,9 @@ public:
 private:
     std::unique_ptr<FftMany> fft_;
     std::deque<std::pair<int, std::vector<double>>> cent_;   // pending centroid reductions (handle, sums)
+    void setup_y();
+    void setup_y_fourier();
+    void exchange_jz_ghosts();
+    void setup_zeta();
     bool stop_ = false;
 };

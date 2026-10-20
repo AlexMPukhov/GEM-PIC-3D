@@ -1,0 +1,42 @@
+# MPI check with the optional free-hand y: laser, dense bunch, sponge, moving window (x), Fawley noise, and
+# free-hand grids along y and zeta (the block edges fall into the graded part of the zeta grid).
+grid {
+  lambda0 = 10 um
+  nx = 32
+  Lx = 240 um
+  y_grid = table
+  y_points = 0, 40, 100 um
+  dy_points = 5, 5, 15 um
+  y_max = 160 um
+  zeta_grid = table
+  zeta_points = 0, 40, 70, 128 um
+  dzeta_points = 2, 2, 0.75, 0.75 um
+  window_length = 128 um
+  sponge = 30 um
+  sponge_y = 45 um
+  dz = 50 um
+  z_end = 3 mm
+}
+laser {
+  a0 = 5
+  wavelength = 10 um
+  angle = 0.1 rad
+  polarization = s
+  tau_fwhm = 0.02 ps
+  start_fwhm = 1.0
+  stop_fwhm = 0
+}
+bunch {
+  charge = 160 pC
+  gamma = 50
+  sigma_x = 10 um
+  sigma_z = 10 um
+  zeta_center = 80 um
+  macroparticles = 8000
+  shot_noise = fawley
+  noise_wavelength = 3.5 um
+}
+output {
+  dir = mpi_out
+  every = 10
+}

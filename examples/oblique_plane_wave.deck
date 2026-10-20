@@ -20,6 +20,15 @@ grid {
   dz            = 50 um        # field step along z (no Courant limit)
   dz_push       = 50 um        # particle sub-steps are further limited to push_phase of laser phase
   z_end         = 22 cm        # the pulse has passed (a_env < 1e-4) by about 20 cm for s and p
+  # Optional free-hand grids (replace ny/Ly or nzeta above):
+  #   y_grid = table               # finite differences in y between walls at +-y_max, fixed in y
+  #   y_points = 0, 60, 300 um     # distance from the axis ...
+  #   dy_points = 2.5, 2.5, 25 um  # ... and the cell size there (linear between, constant beyond)
+  #   y_max = 1 mm
+  #   sponge_y = 150 um
+  #   zeta_grid = table            # free-hand slices, measured from the rear of the window
+  #   zeta_points = 0, 100, 150 um
+  #   dzeta_points = 1, 1, 0.25 um
 }
 
 laser {

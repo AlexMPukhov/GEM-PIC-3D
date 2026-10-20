@@ -1,14 +1,16 @@
 #!/bin/sh
-# MPI check: the decomposition along zeta must reproduce the single-rank run. tests/mpi.deck has the laser,
-# a dense bunch with Fawley noise, the sponge and the moving transverse window; particles cross the block
-# edges. Usage: sh tests/mpi.sh [binary] (default build-mpi/gempic3d); extra mpirun flags in MPIRUN_FLAGS.
+# MPI check: the decomposition along zeta must reproduce the single-rank run. tests/mpi.deck (Fourier y) and
+# tests/mpi_freehand_y.deck have the laser, a dense bunch with Fawley noise, the sponge, the moving transverse
+# window and a free-hand zeta grid; particles cross the block edges. Usage: sh tests/mpi.sh [binary]
+# (default build-mpi/gempic3d); extra mpirun flags in MPIRUN_FLAGS.
 set -e
 BIN=${1:-build-mpi/gempic3d}
-DECK=$(dirname "$0")/mpi.deck
-OUT=$(mktemp -d)
 FLAGS=${MPIRUN_FLAGS:---oversubscribe}
-"$BIN" "$DECK" output.dir="$OUT/np1" > "$OUT/np1.log"
 fail=0
+for DECK in $(dirname "$0")/mpi.deck $(dirname "$0")/mpi_freehand_y.deck; do
+echo "$(basename "$DECK"):"
+OUT=$(mktemp -d)
+"$BIN" "$DECK" output.dir="$OUT/np1" > "$OUT/np1.log"
 for P in 2 3 4; do
   for LASER in true false; do
     mpirun $FLAGS -np $P "$BIN" "$DECK" output.dir="$OUT/np$P$LASER" laser.enabled=$LASER > "$OUT/np$P$LASER.log"
@@ -26,4 +28,5 @@ PY
   done
 done
 rm -rf "$OUT"
+done
 [ $fail = 0 ] && echo "MPI: ALL PASSED" || { echo "MPI: FAILED"; exit 1; }

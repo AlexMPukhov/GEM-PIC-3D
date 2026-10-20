@@ -3,6 +3,7 @@
 #include <fstream>
 #include <sstream>
 #include <stdexcept>
+#include <cstdlib>
 
 static std::string trim(const std::string& s) {
     size_t a = s.find_first_not_of(" \t\r"), b = s.find_last_not_of(" \t\r");
@@ -84,6 +85,23 @@ long Deck::integer(const std::string& b, const std::string& k, long def) const {
     double v = num(b, k, Kind::None);
     if (v != std::floor(v)) throw std::runtime_error(where(b, k) + ": integer expected");
     return long(v);
+}
+std::vector<double> Deck::list(const std::string& b, const std::string& k, Kind kind) const {
+    std::string t = str(b, k);
+    for (char& ch : t) if (ch == ',') ch = ' ';
+    std::istringstream is(t);
+    std::vector<std::string> tok;
+    for (std::string w; is >> w;) tok.push_back(w);
+    std::string unit;
+    if (!tok.empty()) {
+        char* end = nullptr;
+        std::strtod(tok.back().c_str(), &end);
+        if (end == tok.back().c_str()) { unit = tok.back(); tok.pop_back(); }
+    }
+    if (tok.empty()) throw std::runtime_error(where(b, k) + ": list of numbers expected");
+    std::vector<double> v;
+    for (auto& w : tok) v.push_back(parse_with_unit(unit.empty() ? w : w + " " + unit, kind, where(b, k)));
+    return v;
 }
 bool Deck::flag(const std::string& b, const std::string& k, bool def) const {
     if (!has(b, k)) return def;

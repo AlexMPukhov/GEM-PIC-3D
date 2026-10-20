@@ -1,13 +1,16 @@
-# Small but complete case for the MPI check: laser, dense bunch, sponge, moving window, Fawley noise.
+# Small but complete case for the MPI check: laser, dense bunch, sponge, moving window, Fawley noise, Fourier
+# y (the default) and a free-hand zeta grid (the block edges fall into its graded part).
 grid {
   lambda0 = 10 um
   nx = 32
-  ny = 32
   Lx = 240 um
+  ny = 32
   Ly = 240 um
-  sponge = 30 um
-  nzeta = 129
+  zeta_grid = table
+  zeta_points = 0, 40, 70, 128 um
+  dzeta_points = 2, 2, 0.75, 0.75 um
   window_length = 128 um
+  sponge = 30 um
   dz = 50 um
   z_end = 3 mm
 }
