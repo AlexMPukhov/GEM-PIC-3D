@@ -13,8 +13,10 @@ with the radiation of the bunch resolved on the grid and acting back on it
 ## Build, test, run
 
 ```
-make                      # build/gempic3d and build/tests (C++17, OpenMP optional, no external libraries)
-make test                 # 18 checks against analytic references, a few minutes on one core
+make                      # build/gempic3d and build/tests (C++17, OpenMP, no external libraries)
+make test                 # 19 checks against analytic references, a few minutes on one core
+make MPI=1 BUILD=build-mpi                 # MPI (mpicxx); test: sh tests/mpi.sh build-mpi/gempic3d
+make CUDA=1 NVCC=nvcc CUDA_ARCH=-arch=sm_80 BUILD=build-gpu    # GPU (nvcc, cuFFT); add MPI=1 for both
 build/gempic3d examples/oblique_plane_wave.deck --check            # summary and memory estimate
 build/gempic3d examples/oblique_plane_wave.deck                    # run, results in oblique/
 build/gempic3d examples/oblique_plane_wave.deck laser.enabled=false output.dir=ref   # reference
@@ -95,6 +97,29 @@ millimetre this way. The transverse window follows the bunch centroid in whole c
 exact phase factor in Fourier space. Particle coordinates stay continuous, since the analytic laser
 is not periodic in the box; only grid indices wrap.
 
+## Parallelism
+
+**CPU and GPU from one source.** `src/portable.hpp` writes every kernel once as a lambda that runs as an OpenMP
+loop or as a CUDA kernel (`--extended-lambda`); fields and particles live in `Buf<T>` device buffers;
+`src/fftmany.hpp` batches the 2D FFTs over slices (own FFT with OpenMP over planes, or cuFFT). The march is
+local in k: the FFTs are taken out of it (currents forward before, fields inverse after), so every
+(k_x, k_y) is one recurrence over the slices (GPU: one thread per mode; CPU: OpenMP over the modes). The
+sponge on R − R_b is therefore applied after the march of a step, not slice by slice.
+
+**MPI along zeta** (`src/comm.*`). Rank q owns the slices [a, b), rank P−1 at the front, and the particles of
+the half-cells [a+1, b]. Per step: push; particles that enter the half-cells of the rank below are handed over
+during or at the end of the push with the rest of the step; the three top half-cells of unfiltered current go
+to the rank above; the march receives slice b (k-space) from above and sends slice a below; two ghost slices of
+real fields go below for the next push. The co-moving initial field is a pipelined tridiagonal solve. Each rank
+stores only its own slices (about 256 bytes per grid point). The transverse window shift of step k uses the
+centroid of step k − `window_lag` (non-blocking reduction, also in serial runs). The coupling march(q+1) →
+push(q) → march(q) limits the speedup to about P/2; the main gain is the memory per rank.
+
+**Status.** `tests/mpi.sh`: 2, 3 and 4 ranks reproduce the single-rank run exactly (laser, dense bunch, Fawley
+noise, sponge, window shifts, block-edge crossings). The CUDA build (also with MPI) compiles with nvcc 13.4 for
+sm_80 but has not been run on a GPU yet: run `build-gpu/tests` and `tests/mpi.sh` there first. With several
+ranks on GPUs the particle exchange goes through host memory each step.
+
 ## Input deck
 
 | block | key | default | meaning |
@@ -107,6 +132,7 @@ is not periodic in the box; only grid indices wrap.
 | | `dz_push` | `dz` | largest particle sub-step |
 | | `sponge`, `sponge_rate` | 0.1 min(Lx, Ly), 0.1 | width of the absorbing layer, damping per step at the edge |
 | | `move_x`, `move_y` | true | the transverse window follows the bunch |
+| | `window_lag` | 4 | steps between the centroid and the window shift it causes |
 | laser | `enabled` | true | false: reference run without the laser |
 | | `a0`, `wavelength`, `angle` | —, λ0, 0 | amplitude, wavelength, angle of k to z in the x–z plane |
 | | `polarization` | s | s, p, circular |
@@ -128,7 +154,7 @@ is not periodic in the box; only grid indices wrap.
 (η − η_c in FWHM), the local amplitude a0 g, and the field and kinetic energy in J. `particles_start.txt`
 and `particles_end.txt` hold the macroparticles.
 
-## Validation (`make test`)
+## Validation (`make test`, `tests/mpi.sh`)
 
 | check | result |
 |---|---|
@@ -138,6 +164,8 @@ and `particles_end.txt` hold the macroparticles.
 | field of a long round Gaussian bunch against Gauss's law, E_r and B_y at r = σ, 2σ | 0.4–1.7 % (macroparticle noise) |
 | γ = 1000 bunch in its own field over 100 steps: ⟨γ⟩, field energy | 3e-8, 0.1 % |
 | dense γ = 50, 160 pC bunch with and without the sponge | 4e-7 |
+| batched FFT against the plane-by-plane FFT | exact |
+| MPI, 2/3/4 ranks against 1 rank (`tests/mpi.sh`) | identical |
 
 The p-polarized case needs `push_phase` ≈ 0.02: γ drops to about 2 once per cycle there (p⊥0 ≈ a0),
 and at 0.05 the momentum after the pulse is off by 5e-5. The pulse must start and stop at ≥ 3.5 FWHM.
@@ -158,7 +186,5 @@ At 2.5 FWHM the residual A ~ 10⁻³ a0, amplified by the cross term 2p⊥0·A/h
   periodic box need a box-size scan.
 - **Grid fields over a step.** The grid fields are frozen at level s0 during the particle step, as in
   GEM-PIC-RZ; the laser is exact. Halving `dz` checks this.
-- **Performance.** Radix-2 FFT of our own, OpenMP only over particles and k-points. There is no
-  MPI/GPU, no checkpoints, and no HDF5 output yet. The production deck needs about 8 GB. With
-  4400 steps × 1601 slices × 8 FFTs of 256 × 128 it is a multi-day run on one core, and FFTW or a GPU
-  port is the next performance step.
+- **Performance.** No FFTW option, checkpoints or HDF5/openPMD output yet; the GPU build is untested. The
+  production deck needs about 13 GB in total (256 bytes per point), split over the MPI ranks.

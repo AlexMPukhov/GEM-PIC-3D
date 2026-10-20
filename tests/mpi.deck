@@ -1,0 +1,36 @@
+# Small but complete case for the MPI check: laser, dense bunch, sponge, moving window, Fawley noise.
+grid {
+  lambda0 = 10 um
+  nx = 32
+  ny = 32
+  Lx = 240 um
+  Ly = 240 um
+  sponge = 30 um
+  nzeta = 129
+  window_length = 128 um
+  dz = 50 um
+  z_end = 3 mm
+}
+laser {
+  a0 = 5
+  wavelength = 10 um
+  angle = 0.1 rad
+  polarization = s
+  tau_fwhm = 0.02 ps
+  start_fwhm = 1.0
+  stop_fwhm = 0
+}
+bunch {
+  charge = 160 pC
+  gamma = 50
+  sigma_x = 10 um
+  sigma_z = 10 um
+  zeta_center = 80 um
+  macroparticles = 8000
+  shot_noise = fawley
+  noise_wavelength = 3.5 um
+}
+output {
+  dir = mpi_out
+  every = 10
+}

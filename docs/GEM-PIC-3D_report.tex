@@ -1,0 +1,315 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage[sc]{mathpazo}\linespread{1.05}
+\usepackage{microtype}
+\usepackage[a4paper,margin=2.4cm]{geometry}
+\usepackage{amsmath,amssymb,bm}
+\usepackage{booktabs,tabularx,array}
+\usepackage{enumitem}
+\usepackage[dvipsnames]{xcolor}
+\usepackage[colorlinks=true,linkcolor=MidnightBlue,urlcolor=MidnightBlue,citecolor=MidnightBlue]{hyperref}
+\usepackage{titlesec}
+\usepackage{fancyhdr}
+\usepackage{caption}
+\usepackage{float}
+
+\titleformat{\section}{\large\bfseries}{\thesection}{0.8em}{}
+\titlespacing*{\section}{0pt}{2.0ex plus 0.5ex}{1.0ex}
+\setlist{itemsep=0.25ex,topsep=0.6ex}
+\setlength{\parskip}{0.55ex}
+\setlength{\parindent}{0pt}
+\renewcommand{\arraystretch}{1.2}
+\newcolumntype{L}{>{\raggedright\arraybackslash}X}
+\captionsetup{font=small,labelfont=bf,skip=4pt}
+
+\pagestyle{fancy}\fancyhf{}
+\fancyhead[L]{\small GEM-PIC-3D: method, implementation and tests}
+\fancyhead[R]{\small\thepage}
+\renewcommand{\headrulewidth}{0.4pt}
+
+\newcommand{\code}[1]{{\fontencoding{OT1}\fontfamily{cmtt}\selectfont #1}}
+\newcommand{\kperp}{k_\perp}
+\newcommand{\khat}{\hat{\bm k}}
+
+\begin{document}
+
+\begin{center}
+{\LARGE\bfseries GEM-PIC-3D: method, implementation and tests}\\[1.2ex]
+{\large A.~Pukhov}\\[0.6ex]
+{\small 19 October 2026 \quad$\cdot$\quad \href{https://github.com/AlexMPukhov/GEM-PIC-3D}{github.com/AlexMPukhov/GEM-PIC-3D}, commit \code{9e3efe8}}
+\end{center}
+\vspace{1ex}
+
+\section{Summary}
+
+GEM-PIC-3D is a Galilean electromagnetic particle-in-cell code in three dimensions, written from scratch on the model of GEM-PIC-RZ. All 18 checks against analytic references pass.
+
+The transverse directions are Fourier modes, so the field solve of a slice is a closed-form scalar problem per $(k_x,k_y)$. The laser is an analytic plane wave acting on the particles directly, and the grid carries only the bunch's self-fields and radiation. The code is about 1\,150 lines of C++17 with no external libraries.
+
+Like GEM-PIC, it is not a quasi-static code. The forward field keeps its slow derivative, so the laser carrier and the beam's radiation are resolved. The propagation step is set by the slow evolution, not by a Courant condition.
+
+The first application is a 160\,pC, $\gamma=50$ electron bunch overtaken by a plane-wave CO$_2$ laser ($\lambda=10\,\mu$m, $a_0=5$) at 0.1\,rad. The aim is to measure how the grid-resolved radiation of the bunch changes its mean longitudinal momentum relative to a run without the laser.
+
+\section{Motivation}
+
+The target configuration cannot be represented in quasi-cylindrical geometry. Its parameters are self-consistent: with $h=\gamma(1-\beta\cos\theta)\approx0.26$, the laser slips over the bunch in about $2\,\text{ps}/0.0052\approx385$\,ps. Three features rule out an azimuthal-mode code:
+\begin{itemize}
+\item \textbf{The bunch leaves the axis.} In the plane wave the cycle-averaged $\langle p_\perp\rangle$ relative to the laser axis is conserved, at $p_{\perp0}\approx\gamma\theta\approx5$, while $\gamma+p_\parallel$ rises from about 100 to about 148. The bunch therefore turns from 0.1\,rad to about 0.068\,rad off the laser axis and back, which shifts it sideways by 1--2\,mm.
+\item \textbf{The tilted wave needs many modes.} $e^{ik\sin\theta\,x}=\sum_m i^m J_m(k\sin\theta\,r)\,e^{im\varphi}$ needs $m_{\max}\gtrsim 0.063\,\mu\text{m}^{-1}\cdot r_{\max}$.
+\item \textbf{The bunch snakes.} The quiver amplitude $a_0\lambda/(2\pi h)\approx30\,\mu$m exceeds $\sigma=10\,\mu$m, and the bunch is about one wavelength long.
+\end{itemize}
+
+Two choices follow. Fourier modes in $x$ and $y$ give a periodic box that can hold the drift, with a window that follows the bunch. The laser as an analytic field avoids the problems a grid representation would have:
+\begin{itemize}
+\item \textbf{Periodicity:} a tilted plane wave is periodic in $x$ only over $\lambda/\sin\theta\approx100\,\mu$m.
+\item \textbf{Envelope tilt:} a pulse with a finite spectrum would need a box of tens of mm to keep its envelope tilted correctly.
+\item \textbf{Dispersion:} the grid laser would carry the numerical dispersion of the reduced system over 20\,cm.
+\end{itemize}
+
+\section{Model}
+
+The field equations are the Cartesian form of the reduced GEM-PIC system, obtained from the azimuthal-mode form of GEM-PIC-RZ by $\partial_r\to ik_x$ and $im/r\to ik_y$.
+
+Units are $c=1$, lengths in $1/k_0$, times in $1/\omega_0$, momenta in $mc$, fields in $mc\,\omega_0/e$ and densities in $n_c$ ($\lambda_0=10\,\mu$m in the application). The fast coordinate is $\zeta=z-t$ and the slow one is $s=z$ (GT2 for the particles). A level $s$ is therefore the lab plane $z=s$, and the slice $\zeta$ of that level is the time $t=s-\zeta$.
+
+With the characteristic fields $R=(E_x+B_y,\;E_y-B_x)$, $L=(E_x-B_y,\;E_y+B_x)$, $a=ik_x$ and $b=ik_y$, the equations are
+\begin{equation}
+\begin{aligned}
+\partial_s R_x &= a E_z + b B_z - j_x, & \partial_\zeta L_x &= \tfrac12\,(a E_z - b B_z + j_x),\\
+\partial_s R_y &= b E_z - a B_z - j_y, & \partial_\zeta L_y &= \tfrac12\,(a B_z + b E_z + j_y),\\
+\partial_\zeta B_z &= a E_y - b E_x, & \partial_\zeta E_z &= -(a B_y - b B_x) + j_z .
+\end{aligned}
+\label{eq:system}
+\end{equation}
+The $R$ equations are exact in GT1. The slow derivative is dropped only where it appears together with $\partial_\zeta$, in the backward and longitudinal fields. Each line was re-derived from Maxwell's equations before the code was written.
+
+In vacuum a mode $e^{i\kappa\zeta-i\omega s}$ has
+\begin{equation}
+\omega=\frac{2\kappa\kperp^2}{4\kappa^2-\kperp^2}\simeq\frac{\kperp^2}{2\kappa},
+\label{eq:disp}
+\end{equation}
+the paraxial limit of $\sqrt{\kappa^2+\kperp^2}-\kappa$. For the 0.1\,rad tilt of the application the two differ by 0.5\,\%. The backward wave is not described.
+
+\section{Discretization}
+
+Each step computes level $s_1=s_0+\Delta$ by marching from the front slice of the window to the rear. Because the transverse operators are multiplications, every $(k_x,k_y)$ is an independent scalar problem with a closed-form solution.
+
+The window has $N$ uniform slices $\zeta_n=nh$. Fields live on the slices and currents on the half-cells between them. At the front slice $L=E_z=B_z=0$.
+\begin{itemize}
+\item \textbf{$R$:} integrated with the trapezoidal rule in $s$. The current at slice $n$ is the sum of the two adjacent half-cells at both levels, weighted $\Delta/4$.
+\item \textbf{$L$, $E_z$, $B_z$:} integrated with the trapezoidal rule over the half-cell from $n+1$ to $n$.
+\end{itemize}
+
+$R$ and $L$ of slice $n$ are linear in its unknown $E_z$ and $B_z$:
+\begin{equation}
+\begin{aligned}
+R_x &= R^*_x + D\,(a E_z + b B_z), & R_y &= R^*_y + D\,(b E_z - a B_z),\\
+L_x &= L^*_x - \tfrac{h}{4}(a E_z - b B_z), & L_y &= L^*_y - \tfrac{h}{4}(a B_z + b E_z),
+\end{aligned}
+\end{equation}
+where $D=\Delta/2$ and the starred parts collect everything already known.
+
+Inserted into the $B_z$ and $E_z$ equations, the cross terms cancel exactly. This is the Fourier counterpart of the discrete curl-grad identities of GEM-PIC-RZ, and it leaves
+\begin{equation}
+\begin{aligned}
+B_z &= \frac{B_z^{n+1} - \tfrac{h}{2} C^{n+1} - \tfrac{h}{4} S_B}{1 + \tfrac{h}{4}\left(D + \tfrac{h}{4}\right) \kperp^2},\\[1ex]
+E_z &= \frac{E_z^{n+1} - \tfrac{h}{2} Q^{n+1} - \tfrac{h}{4} S_E - h\, j_z^{n+1/2}}{1 + \tfrac{h}{4}\left(D + \tfrac{h}{4}\right) \kperp^2},
+\end{aligned}
+\label{eq:closed}
+\end{equation}
+with $C=aE_y-bE_x$, $Q=-aB_y+bB_x$, $S_B=aR^*_y+aL^*_y-bR^*_x-bL^*_x$ and $S_E=-aR^*_x+aL^*_x+bL^*_y-bR^*_y$. The closed form was checked against a direct solve with sympy. $R$ and $L$ follow by back-substitution.
+
+The same routine with $D=0$ evaluates $E_z$, $B_z$ and $L$ of a given $R$; it is used at initialization. Per slice, the march costs three inverse FFTs ($R$, $L$, $E_z/B_z$ as pairs of real fields packed into one complex transform), two forward FFTs of the current, and two more when the sponge is on.
+
+\section{External laser}
+
+The laser is an exact plane-wave pulse evaluated at each particle's position and time, so it needs no grid resolution, no transverse periodicity and no dispersion correction. Its vector potential is
+\begin{equation}
+\bm A = a_0\, g(\eta)\cos\!\big(k_L(\eta-\eta_c)+\varphi\big)\,\bm e_{\mathrm{pol}},\qquad \eta=t-\khat\cdot\bm r,\qquad \khat=(\sin\theta,0,\cos\theta),
+\end{equation}
+with $\bm E=-d\bm A/d\eta$, including the envelope derivative, and $\bm B=\khat\times\bm E$. The envelope $g$ is Gaussian, with an intensity FWHM given by \code{tau\_fwhm}.
+
+\begin{table}[H]
+\centering\small
+\caption{Polarizations.}
+\begin{tabularx}{0.85\textwidth}{l l L}
+\toprule
+Polarization & $\bm e_{\mathrm{pol}}$ & Remark\\
+\midrule
+s & $(0,1,0)$ & $\gamma$ stays between 50 and 98 in the application\\
+p & $(\cos\theta,0,-\sin\theta)$ & $p_{\perp0}$ and $A$ cancel once per cycle, $\gamma$ dips to about 2\\
+circular & both, $a_0$ per component & \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+The bunch centre starts at $\eta=0$ and the pulse peak sits at $\eta_c={}$\,\code{start\_fwhm}\,$\cdot\,\tau$. The run ends at \code{z\_end}, or once the bunch is \code{stop\_fwhm}\,$\cdot\,\tau$ past the peak.
+
+The scattered field on the grid and the analytic laser add in the force on each particle. The energy exchange with the laser, including the interference term, is therefore part of the dynamics, even though the laser itself is never updated.
+
+\section{Particles}
+
+Particles follow their characteristics with $z$ as the independent variable, integrated by RK4 on the total Lorentz force:
+\begin{equation}
+\frac{d\bm r_\perp}{dz}=\frac{\bm p_\perp}{p_z},\qquad
+\frac{d\zeta}{dz}=-\frac{\gamma-p_z}{p_z},\quad \gamma-p_z=\frac{1+p_\perp^2}{\gamma+p_z},\qquad
+\frac{d\bm p}{dz}=\frac{q\,(\gamma\bm E+\bm p\times\bm B)}{p_z}.
+\label{eq:push}
+\end{equation}
+The form of $\gamma-p_z$ avoids cancellation at $\gamma=50$. The laser is evaluated at the exact $(x,z,t=z-\zeta)$. The grid fields are those of level $s_0$, interpolated with TSC weights transversely and linearly in $\zeta$.
+
+\textbf{Sub-steps.} A sub-step is at most \code{dz\_push}, and at most \code{push\_phase} of the laser phase the particle sees, $k_L(\gamma-\bm p\cdot\khat)\,dz/p_z$. The sub-steps land exactly on the next plane $z=s_1$. The default of 0.05\,rad gives 40 sub-steps per period of about 1.9\,mm in the application; p-polarization needs 0.02 (Sec.~\ref{sec:tests}).
+
+\textbf{Why not Boris or Vay.} On steps set by the slow scale, $q\Delta t\,\bm E$ and $q\Delta t\,\bm v\times\bm B$ of a co-propagating wave are each about 100 times the net force. The magnetic rotation angle $q\Delta t\,B/\gamma\approx0.7$ is far from small, and the split pushers fail. The first version used Vay sub-steps, and a test electron left a 5-FWHM pulse with $\gamma=310$ instead of 50. Integrating the total force along $z$ has no splitting error.
+
+\textbf{Deposition.} A particle on the plane $z=s$ carries the charge $qw/v_z$ per unit $\zeta$, so $\bm j=qw\bm v/v_z$, and $j_z$ does not depend on the velocity. The scheme is:
+\begin{itemize}
+\item NGP over the half-cell in $\zeta$ and TSC transversely;
+\item a $(1,2,1)/4$ filter along $\zeta$, which removes the source of the $\zeta$-Nyquist Cherenkov mode as in GEM-PIC-RZ;
+\item an optional transverse filter $\cos^2(k_x\Delta x/2)\cos^2(k_y\Delta y/2)$.
+\end{itemize}
+
+\textbf{Loading.} The bunch is sampled at $t=0$ in the lab (Gaussian in $x$, $y$ and $z$, with optional emittance and energy spread). Each particle is mapped ballistically to the plane $z=0$, which gives $\zeta=\zeta_c+z/v_z$. With \code{shot\_noise = fawley}, beamlets of $M$ macroparticles are spread evenly over \code{noise\_wavelength} and displaced randomly. The bunching at harmonics $h<M/2$ then equals that of the $10^9$ real electrons, $\langle|b_h|^2\rangle=1/N_e$ [Fawley, PRST-AB 5, 070701 (2002)].
+
+\section{Initial field and boundaries}
+
+The bunch starts in its own co-moving field. The transverse box is periodic, with three corrections for an isolated bunch: no net current, a sponge that absorbs only radiation, and a window that follows the bunch.
+
+\textbf{Co-moving field.} The potential follows from $-(\nabla_\perp^2+\gamma^{-2}\partial_\zeta^2)\psi=\rho$, with $R=(1+\beta)\bm E_\perp$ and $\bm E_\perp=-\nabla_\perp\psi$, as in GEM-PIC-RZ. This is one tridiagonal solve in $\zeta$ per $(k_x,k_y)$. The march with $\Delta=0$ then gives $E_z$, $B_z$ and $L$.
+
+\textbf{No net current.} The $\kperp=0$ component of the current is removed. In a periodic box a net current would drive uniform fields: a uniform $E_x$ growing with $s$ from the bunch's sideways drift, and the sheet field of a periodic array of bunches.
+
+\textbf{Sponge on the radiation only.} At the box edges the sponge damps $R-R_b$ each step, not $R$ itself. Here $R_b=2\bm E_\perp$ with $\kperp^2\psi=\rho$ is the bound field of the charge in the slice, in the $v=c$ limit, which is local in the slice. The bound field of a relativistic bunch reaches $\gamma\sigma_z\approx0.5$\,mm, the size of the box. Damping all of $R$ therefore acted like a resistive wall: the bunch regenerated its Coulomb field every step at the expense of its kinetic energy.
+
+\textbf{Transverse window.} The window follows the bunch centroid in whole cells. A shift is an exact phase factor $e^{i\bm k\cdot\bm\Delta}$ on the spectra and an index roll on the real-space fields. Particle coordinates stay continuous because the analytic laser is not periodic in the box; only grid indices wrap.
+
+\section{Implementation}
+
+The code is about 1\,150 lines of C++17 with no external libraries, built with \code{make}; OpenMP is optional. Its input, overrides and checks follow GEM-PIC-RZ.
+
+\begin{table}[H]
+\centering\small
+\caption{Source layout.}
+\begin{tabularx}{\textwidth}{l L}
+\toprule
+File & Content\\
+\midrule
+\code{src/fft.hpp} & radix-2 FFT in 1D and 2D; two real fields per complex transform, forward and inverse\\
+\code{src/deck.*} & block/key parser with units, command-line overrides \code{block.key=value}, errors with file and line for unknown keys or wrong units\\
+\code{src/sim.*} & configuration, analytic laser, loading, RK4 push, deposition, $\zeta$-march, co-moving field, sponge, window shift, diagnostics\\
+\code{src/main.cpp} & driver, \code{--check} summary with memory estimate\\
+\code{tests/tests.cpp} & the 18 checks\\
+\code{tools/compare.py} & $\langle p_z\rangle$, $\langle\gamma\rangle$ and $\langle\bm p\cdot\khat\rangle$ of a laser run against the reference run, plane by plane\\
+\code{examples/oblique\_plane\_wave.deck} & the target configuration\\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\textbf{A step.} Each step runs in this order:
+\begin{enumerate}
+\item Push all particles from $z=s_0$ to $s_1$ in the level-$s_0$ fields and the exact laser.
+\item Deposit the level-$s_1$ current and filter it along $\zeta$.
+\item March from the front: per slice, the closed-form solve per mode, then the sponge on $R-R_b$, then the real-space $\bm E$ and $\bm B$ stored for the next push. The level-$s_0$ current of each half-cell is overwritten once its last user slice is done.
+\item Shift the transverse window if the centroid has moved two or more cells.
+\end{enumerate}
+
+\textbf{Storage.} Each grid point stores $R_x$, $R_y$, $E_z$ and $B_z$ of level $s_0$ and the level-$s_0$ current $j_x$, $j_y$ as complex spectra. It also stores $\bm E$ and $\bm B$ in real space in single precision, and the deposited real current. This comes to about 148 bytes per point.
+
+\textbf{Cost of the production deck.} The grid is $256\times128\times1601$ ($\Delta x=\Delta y=2.5\,\mu$m, $\Delta\zeta=0.25\,\mu$m). It needs about 7.8\,GB and 4\,400 steps of $\Delta=50\,\mu$m to reach $z=22$\,cm. With the own FFT and a sequential march this is a multi-day run on one core.
+
+\textbf{Output.} \code{diag.txt} has one line per output step with the following columns:
+\begin{itemize}
+\item $z$ and the number of particles still alive;
+\item the centroid $(x,y,\zeta)$ and the rms sizes;
+\item $\langle p_x\rangle$, $\langle p_y\rangle$, $\langle p_z\rangle$, $\langle\gamma\rangle$, $\langle\bm p\cdot\khat\rangle$ and the rms of $p_z$;
+\item the bunch's position in the pulse in FWHM, and the local amplitude $a_0 g$;
+\item the field and kinetic energy in J.
+\end{itemize}
+The macroparticles are written at the start and at the end.
+
+\clearpage
+\section{Tests}\label{sec:tests}
+
+All 18 checks of \code{make test} pass, each against an independent analytic reference; the suite takes a few minutes on one core.
+
+\begin{table}[H]
+\centering\small
+\caption{Checks of \code{make test}.}
+\begin{tabularx}{\textwidth}{@{}l L L >{\raggedright\arraybackslash}p{2.35cm} >{\raggedright\arraybackslash}p{2.0cm}@{}}
+\toprule
+\# & Check & Reference & Result & Tolerance\\
+\midrule
+1--2 & FFT: pair transform, round trip & direct DFT & $10^{-15}$ & $10^{-12}$\\
+3 & vacuum: $\omega$ of a forward wave packet tilted by 0.1\,rad ($\kappa=k_0$, 32 points per $\lambda$) & Eq.~\eqref{eq:disp} & 0.34\,\% & 1\,\%\\
+4 & vacuum: amplitude after 40 steps & constant (trapezoidal rule) & $4\times10^{-5}$ & $2\times10^{-3}$\\
+5--8 & one electron, s-pol, $a_0=5$, $\theta=0.1$, $\gamma=50$, no self-fields: $h=\gamma-\bm p\cdot\khat$; peak $\gamma$; $p_z$ and $p_x$ after the pulse & conserved $h$; peak $\gamma=\tfrac12[(1+p_{\perp,\max}^2)/h+h]$ with $\bm p_\perp+q\bm A_\perp$ conserved; initial momentum (Lawson--Woodward) & $10^{-8}$; 0.04\,\%; $6\times10^{-8}$; $5\times10^{-8}$ & $10^{-5}$; 0.2\,\%; $10^{-5}$; $10^{-4}$\\
+9--12 & the same, p-pol ($\gamma$ dips to about 2 each cycle) & as above & $2\times10^{-6}$; 0.06\,\%; $2\times10^{-6}$; $9\times10^{-6}$ & as above\\
+13--14 & $E_r$ of a long round Gaussian bunch ($\gamma=1000$) at $r=\sigma$, $2\sigma$ & Gauss's law, $\lambda(1-e^{-r^2/2\sigma^2})/(2\pi r)$ & 1.7\,\%, 1.0\,\% & 3\,\%\\
+15 & $B_y$ of the same bunch at $r=\sigma$ & as 13 & 0.4\,\% & 3\,\%\\
+16 & $\gamma=1000$ bunch in its own field, 100 steps: $\langle\gamma\rangle$ & constant & $3\times10^{-8}$ & $10^{-6}$\\
+17 & the same: field energy & constant & 0.14\,\% & 2\,\%\\
+18 & dense $\gamma=50$, 160\,pC bunch, 40 steps, with and without sponge: $\langle p_z\rangle$ & equal & $4\times10^{-7}$ & $2\times10^{-6}$\\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+The Gauss deviations are macroparticle noise rather than bias: the backward field $L$ of the co-moving bunch scatters in sign from slice to slice. Test 18 detects the resistive-wall drain of the first sponge, which lost about $10^{-3}$ of $\langle p_z\rangle$ over the same 1.9\,mm.
+
+\textbf{Push convergence.} One electron in a 0.8\,ps FWHM pulse, started and stopped at 2.5\,FWHM; relative errors after the pulse are given in Table~\ref{tab:conv}.
+
+\begin{table}[H]
+\centering\small
+\caption{Convergence of the particle push with the phase sub-step.}\label{tab:conv}
+\begin{tabular}{@{}c cc cc@{}}
+\toprule
+& \multicolumn{2}{c}{s-polarization} & \multicolumn{2}{c}{p-polarization}\\
+\cmidrule(lr){2-3}\cmidrule(l){4-5}
+\code{push\_phase} [rad] & $\Delta h/h$ & $\Delta p_z/p_z$ & $\Delta h/h$ & $\Delta p_z/p_z$\\
+\midrule
+0.2 & $7.5\times10^{-6}$ & $7.5\times10^{-6}$ & $9.2\times10^{-2}$ & $1.1\times10^{-1}$\\
+0.1 & $7.5\times10^{-6}$ & $7.5\times10^{-6}$ & $1.9\times10^{-3}$ & $2.6\times10^{-3}$\\
+0.05 & $6.0\times10^{-7}$ & $6.3\times10^{-7}$ & $5.2\times10^{-5}$ & $4.7\times10^{-4}$\\
+0.025 & $2.1\times10^{-8}$ & $5.5\times10^{-8}$ & $1.6\times10^{-6}$ & $3.9\times10^{-4}$\\
+\bottomrule
+\end{tabular}
+\end{table}
+
+In s-polarization the sub-step at 0.2 and 0.1\,rad is set by \code{dz\_push}, and the error converges at fifth order below that. In p-polarization $h$ converges, but $p_z$ levels off at $3.9\times10^{-4}$. That plateau is physics, not numerics: at 2.5\,FWHM the residual $A\approx10^{-3}a_0$ is amplified by the cross term $2p_{\perp0}A/h$. Starting and stopping at 3.5\,FWHM (now the default) removes it, and tests 9--12 then pass at $2\times10^{-6}$.
+
+\section{Errors found during development}
+
+The tests and a first no-laser run exposed four errors of the first version, each now fixed and covered by a test.
+
+\begin{table}[H]
+\centering\small
+\caption{Errors of the first version.}
+\begin{tabularx}{\textwidth}{@{}L L L l@{}}
+\toprule
+Error & Symptom & Fix & Covered by\\
+\midrule
+Vay sub-steps on the slow scale & test electron left the pulse with $\gamma=310$ instead of 50 & RK4 in $z$ on the total force & tests 5--12\\
+particles wrapped periodically in $x$ & $\bm p_\perp+q\bm A_\perp$ jumped when the drifting electron crossed the box edge (laser phase shifted by $k\sin\theta\,L_x$) & continuous coordinates, only grid indices wrap & tests 5--12\\
+fixed $z$ sub-step & p-pol: $\Delta h/h=2\times10^{-3}$ where $\gamma$ dips to about 2 & sub-step limited by the laser phase (\code{push\_phase}) & tests 9--12\\
+sponge on all of $R$ & no laser: $\langle p_z\rangle$ fell by $3\times10^{-2}$ per mm (resistive-wall drain of the bound field) & sponge on $R-R_b$ & test 18\\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+One further finding is a constraint on use rather than an error. The pulse must start and stop at least 3.5\,FWHM from its peak. At 2.5\,FWHM the residual field leaves $4\times10^{-4}$ in $p_z$ for p-polarization, enough to mask a small radiation-reaction signal.
+
+\section{Limits and next steps}
+
+The code is validated for fields, single-particle dynamics and bunch self-fields, but not yet for radiation energy balance. That check comes before any physics result.
+\begin{itemize}
+\item \textbf{Backward radiation is not described,} since $\partial_s L$ is dropped. Momentum gained from the recoil of backward or large-angle emission is outside the model by construction.
+\item \textbf{No radiation energy-balance test.} The next check is coherent emission of a short bunch against the far-field radiation integral, as in \code{tests/undulator.sh} of GEM-PIC-RZ, with the analytic plane wave as the undulator. Diagnostics for the energy exchanged with the external laser and absorbed in the sponge are also missing.
+\item \textbf{Slow particles.} The reduced $\zeta$-equations assume sources with $v\approx c$. In p-polarization $v_z\approx0.87$ for part of every cycle, where the self-field error is $O(1-v_z)$.
+\item \textbf{Periodic images.} The bound field reaches $\gamma\sigma_z\approx0.5$\,mm, so the box size needs a scan.
+\item \textbf{Grid fields frozen over a step,} as in GEM-PIC-RZ; the laser is exact. Halving \code{dz} checks this.
+\item \textbf{Performance.} There is no FFTW, MPI, GPU port, checkpointing or HDF5/openPMD output yet. The production deck needs about 7.8\,GB and days on one core.
+\end{itemize}
+
+\textbf{Open question.} The problem statement gives the laser ``length = 2\,ps''. The deck reads this as the full pulse and uses an intensity FWHM of 0.5\,ps, so the pulse has passed at $z\approx20$\,cm. A 2\,ps FWHM would lengthen the run about fourfold.
+
+\end{document}
