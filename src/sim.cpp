@@ -225,6 +225,8 @@ Config Config::from_deck(const Deck& d) {
     c.every = int(d.integer("output", "every", 10));
     c.dump_particles = d.flag("output", "particles", true);
     c.frames = d.flag("output", "frames", false);
+    c.axis = d.flag("output", "axis", false);
+    c.freeze_bunch = d.flag("numerics", "freeze_bunch", false);
     d.check_unused();
     return c;
 }
@@ -262,8 +264,9 @@ void Config::summary(FILE* f, int ranks) const {
         std::fprintf(f, "  plasma: n0 = %.4g cm^-3 (%.4g n_c), %s, r_max = %.4g um, %d x %d per cell, smooth_length %.4g um; %d passes per slice, predictor %s, vz_min %.3g, vz_beam %.3g\n",
                      n0 * nc * 1e-6, n0, parabolic ? "parabolic channel" : "uniform", r_max < 1e299 ? r_max * um : -1.0, ppc_x, ppc_y,
                      smooth_length * um, iterations, predictor_extrapolate ? "extrapolate" : "previous", vz_min, vz_beam);
-    std::fprintf(f, "  output: dir '%s', every %d steps (%ld steps to z_end)%s\n", dir.c_str(), every,
-                 long(std::ceil(z_end / dz - 1e-9)), frames ? ", frames" : "");
+    std::fprintf(f, "  output: dir '%s', every %d steps (%ld steps to z_end)%s%s\n", dir.c_str(), every,
+                 long(std::ceil(z_end / dz - 1e-9)), frames ? ", frames" : "", axis ? ", axis lineouts" : "");
+    if (freeze_bunch) std::fprintf(f, "  bunch frozen (numerics.freeze_bunch): not pushed, a rigid source\n");
     std::fprintf(f, "  self fields %s, zeta filter %s, transverse filter %s\n", self_fields ? "on" : "off", zeta_filter ? "on" : "off",
                  k_filter ? "on" : "off");
 }
@@ -498,7 +501,7 @@ namespace {
 struct PushCtx {
     const float* F; int a, ns, N, nx, ny, nk, self, yf; double dx, dy, Lx, Ly;
     Axis zax, yax;
-    Laser laser; double X0, zc, dz_push, push_phase, zhand, zmax, ylo, yhi, s1, vz_min;
+    Laser laser; double X0, zc, dz_push, push_phase, zhand, zmax, ylo, yhi, s1, vz_min; int freeze;
 };
 struct State { double x, y, zeta, px, py, pz; };
 
@@ -579,6 +582,7 @@ HD inline State axpy(const State& a, double h, const State& b) {
 // A particle that enters the half-cells of the rank below (zeta < zhand) at the start of a sub-step is
 // handed over with the rest of the step.
 HD inline void push_one(const PushCtx& c, Particle& p, double z0) {
+    if (c.freeze && p.sp == SP_BUNCH) { p.z = c.s1; return; }   // numerics.freeze_bunch: rigid, (x, y, zeta, p) fixed
     State Y{p.x, p.y, p.zeta, p.px, p.py, p.pz};
     double z = z0;
     while (z < c.s1 - 1e-12 * ::fabs(c.s1)) {
@@ -629,7 +633,7 @@ void Simulation::push(double s0, double s1, long i0, long i1) {
     c.yf = yf; c.dx = dx; c.dy = dy; c.Lx = cfg.Lx; c.Ly = cfg.Ly; c.zax = zax; c.yax = yax; c.laser = laser; c.X0 = X0;
     c.zc = cfg.zeta_center; c.dz_push = cfg.dz_push; c.push_phase = cfg.push_phase;
     c.zhand = comm.rank == 0 ? -1e300 : cfg.zeta[a + 1];
-    c.zmax = cfg.zeta[N - 1]; c.s1 = s1; c.vz_min = cfg.plasma_on ? cfg.vz_min : 0;
+    c.zmax = cfg.zeta[N - 1]; c.s1 = s1; c.vz_min = cfg.plasma_on ? cfg.vz_min : 0; c.freeze = cfg.freeze_bunch;
     c.ylo = yf ? -1e300 : cfg.ynode[1]; c.yhi = yf ? 1e300 : cfg.ynode[cfg.ny - 1];
     Particle* P = parts.data();
     par_for(i1 - i0, [=] HD(long k) {
@@ -1855,7 +1859,7 @@ void Simulation::march_plasma(double s0, double s1) {
         c.F = F.data(); c.a = a; c.ns = ns; c.N = N; c.nx = cfg.nx; c.ny = cfg.ny; c.nk = nk; c.self = 1;
         c.yf = yf; c.dx = dx; c.dy = dy; c.Lx = cfg.Lx; c.Ly = cfg.Ly; c.zax = zax; c.yax = yax; c.laser = laser; c.X0 = X0;
         c.zc = cfg.zeta_center; c.dz_push = cfg.dz_push; c.push_phase = cfg.push_phase; c.zhand = -1e300;
-        c.zmax = cfg.zeta[N - 1]; c.s1 = s1; c.vz_min = 0;
+        c.zmax = cfg.zeta[N - 1]; c.s1 = s1; c.vz_min = 0; c.freeze = 0;
         c.ylo = yf ? -1e300 : cfg.ynode[1]; c.yhi = yf ? 1e300 : cfg.ynode[cfg.ny - 1];
     }
     sc.zs = zs.data(); sc.J = jsr.data(); sc.ia = iA.data(); sc.id = iD.data();
@@ -2095,4 +2099,37 @@ void Simulation::write_frame(const std::string& file) {
     }
     std::fclose(f);
     std::rename(tmp.c_str(), file.c_str());
+}
+
+// axis.txt (output.axis): one line per output step: z [mm], then E_z and E_x - B_y (the transverse force on an
+// electron moving at c along z, per -e) on the axis x = 0, y = 0 at every slice, in code units m c omega0 / e.
+// The first line (#) holds zeta [um] of the slices.
+void Simulation::write_axis(const std::string& file, bool first) {
+    const int nx = cfg.nx, ny = cfg.ny;
+    const int i0 = ((int(std::lround(-X0 / dx)) % nx) + nx) % nx;
+    const int j0 = yf ? ((int(std::lround(-Y0 / dy)) % ny) + ny) % ny : ny / 2;
+    const std::vector<float> Fh = cfg.self_fields ? F.host() : std::vector<float>(F.size(), 0.0f);
+    const long fpl = long(ns + 2) * nk;
+    std::vector<double> mine(size_t(ns) * 2);
+    for (int l = 0; l < ns; ++l) {
+        const long k = long(l) * nk + long(j0) * nx + i0;
+        // free-hand y: B_y (comp 4) is on the nodes like E_z and E_x
+        mine[2 * l] = Fh[2 * fpl + k];
+        mine[2 * l + 1] = Fh[0 * fpl + k] - Fh[4 * fpl + k];
+    }
+    std::vector<char> all = comm.gather_bytes(mine.data(), mine.size() * sizeof(double));
+    if (comm.rank != 0) return;
+    const double* A = reinterpret_cast<const double*>(all.data());
+    FILE* f = std::fopen(file.c_str(), first ? "w" : "a");
+    if (!f) throw std::runtime_error("cannot write " + file);
+    if (first) {
+        std::fprintf(f, "# GEM-PIC-3D axis lineouts: z_mm, then Ez(zeta_n) for n = 0..%d, then (Ex - By)(zeta_n); code units\n# zeta_um", N - 1);
+        for (int n = 0; n < N; ++n) std::fprintf(f, " %.6g", cfg.zeta[n] * cfg.Lu * 1e6);
+        std::fprintf(f, "\n");
+    }
+    std::fprintf(f, "%.9g", s * cfg.Lu * 1e3);
+    for (int n = 0; n < N; ++n) std::fprintf(f, " %.7e", A[2 * n]);
+    for (int n = 0; n < N; ++n) std::fprintf(f, " %.7e", A[2 * n + 1]);
+    std::fprintf(f, "\n");
+    std::fclose(f);
 }

@@ -65,6 +65,8 @@ struct Config {
     int every = 10;
     bool dump_particles = true;
     bool frames = false;                               // output.frames: frame_NNNNN.bin every output step (GUI)
+    bool axis = false;                                 // output.axis: axis.txt, E_z and E_x - B_y on the axis
+    bool freeze_bunch = false;                         // numerics.freeze_bunch: the bunch is not pushed (rigid source)
 
     static Config from_deck(const Deck& d);
     static Config base_units(double lambda0);          // units only (used by the tests)
@@ -120,6 +122,7 @@ public:
     void diagnostics(FILE* f, bool header);        // collective; f is used on rank 0 only
     void dump_particles(const std::string& file);  // collective
     void write_frame(const std::string& file);     // collective: fields in the planes y = 0 and x = 0 (GUI)
+    void write_axis(const std::string& file, bool first);   // collective: axis lineouts (output.axis)
 
     // fields of level s1 (march with D = dz/2), or E_z, B_z, L of the stored R (D = 0)
     void solve_fields(double D);

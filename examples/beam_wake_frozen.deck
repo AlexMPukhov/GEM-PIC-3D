@@ -1,0 +1,54 @@
+# Diagnosis of the OPEN check test_plasma_wake_beam: 3D linear wake of a narrow electron bunch in a uniform
+# plasma, the same case as the test (tests/tests.cpp), in physical units (lambda0 = 10 um, k0^-1 = 1.5915 um).
+#   plasma: n0 = 0.01 n_c (k_p = 0.1 k0), switched on at z = 0 (no ramp)
+#   bunch:  gamma = 1000, sigma_r = sigma_z = 5 / k0 (k_p sigma = 0.5), n_b = 0.01 n0 (Q = 1.4176 pC)
+#   numerics.freeze_bunch = true: the bunch is not pushed, an exactly rigid source, so the true solution is
+#   steady in s. Run it also with freeze_bunch=false for comparison (command line below).
+# Output: diag/axis.txt, one line per step: z, E_z(zeta) and (E_x - B_y)(zeta) on the axis; frames every 25 steps.
+#   build/gempic3d examples/beam_wake_frozen.deck                                        # frozen bunch
+#   build/gempic3d examples/beam_wake_frozen.deck numerics.freeze_bunch=false output.dir=wake_moving
+
+grid {
+  lambda0       = 10 um
+  nx            = 64
+  ny            = 64
+  Lx            = 190.986 um        # 120 / k0
+  Ly            = 190.986 um
+  sponge        = 0 um
+  nzeta         = 301               # h = 0.5 / k0
+  window_length = 238.732 um        # 150 / k0
+  dz            = 15.9155 um        # 10 / k0
+  z_end         = 2387.32 um        # 150 steps
+  move_x        = false
+  move_y        = false
+}
+
+plasma {
+  density       = 0.01 n_c
+  ppc_x         = 1
+  ppc_y         = 1
+}
+
+bunch {
+  charge         = 1.41764 pC
+  gamma          = 1000
+  sigma_x        = 7.95775 um       # 5 / k0
+  sigma_z        = 7.95775 um
+  zeta_center    = 190.986 um       # 120 / k0
+  macroparticles = 200000
+  seed           = 1
+}
+
+numerics {
+  freeze_bunch  = true
+  k_filter      = false
+  iterations    = 2
+}
+
+output {
+  dir       = wake_frozen
+  every     = 1
+  axis      = true
+  frames    = false
+  particles = false
+}
