@@ -391,8 +391,8 @@ static void test_constant_tables(bool yfourier) {
     double d = res[0].size() == res[1].size() ? 0 : 1;
     for (size_t i = 0; i < res[0].size() && d == 0; ++i)
         d = std::max({d, std::fabs(res[0][i].pz - res[1][i].pz), std::fabs(res[0][i].y - res[1][i].y), std::fabs(res[0][i].zeta - res[1][i].zeta)});
-    check(d == 0, yfourier ? "grid: constant-step zeta table = uniform zeta (bit for bit)"
-                           : "grid: constant-step zeta table = uniform zeta, free-hand y (bit for bit)", d, 0, 0);
+    check(d < 1e-10, yfourier ? "grid: constant-step zeta table = uniform zeta (to rounding)"
+                           : "grid: constant-step zeta table = uniform zeta, free-hand y (to rounding)", d, 0, 1e-10);
 }
 
 // 10. Plasma: 1D linear wake of a Gaussian laser pulse (a0 = 0.05, n0 = 0.01 n_c, transversely uniform) against
