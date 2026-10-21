@@ -43,9 +43,28 @@ struct Config {
     long nmacro = 0;
     std::string noise = "random";
     double noise_lambda = 0; int beamlet = 4; unsigned long seed = 1;
+    // grid lasers (laser blocks with type = gaussian): paraxial Gaussian pulses on the grid
+    struct GridLaser {
+        double a0 = 1, kL = 1, waist = 10, tau = 10, zeta_c = 0, z_focus = 0, cep = 0, pol_angle = 0;
+        bool circular = false; int helicity = 1;
+    };
+    std::vector<GridLaser> glasers;
+    // plasma (code units): n = n0 f(z) g(r) for r < r_max; f: table (z_points, z_values; constant beyond its
+    // ends; 1 without a table); g: 1 (uniform) or 1 + channel_depth r^2 / r_channel^2 (parabolic)
+    bool plasma_on = false;
+    double n0 = 0, r_max = 1e300, channel_depth = 0, r_channel = 1, smooth_length = 0;
+    std::vector<double> pz_points, pz_values;
+    bool parabolic = false;
+    int ppc_x = 2, ppc_y = 2;
+    // streaming particles (as in GEM-PIC-RZ): passes per slice, trapping and return to streaming
+    int iterations = 2;
+    double vz_min = 0.8, vz_beam = 0.9, trap_advance = 1.0;
+    bool predictor_extrapolate = true;                // streaming current of half-cell n-1: s0 + extrapolated change
+    double plasma_density(double x, double y, double z) const;   // x, y relative to the axis (lab)
     std::string dir = "out";
     int every = 10;
     bool dump_particles = true;
+    bool frames = false;                               // output.frames: frame_NNNNN.bin every output step (GUI)
 
     static Config from_deck(const Deck& d);
     static Config base_units(double lambda0);          // units only (used by the tests)
@@ -82,8 +101,15 @@ struct Laser {
     }
 };
 
-struct Particle { double x, y, zeta, px, py, pz, w, rem; int alive, pad; };
-// alive: 0 lost, 1 own, 2 handed to the rank below during the push (rem = z still to go), 3 adopted
+// w: number of real particles (code units of n_c / k0^3), q: charge number (-1 electron), qm = q / mass (in m_e),
+// z: lab position (beam list: the plane z = s after a push; streaming particles move in z within a level),
+// sp: species (0 bunch, 1 trapped plasma electron, 2 plasma electron streaming).
+struct Particle { double x, y, zeta, px, py, pz, w, rem, z, q, qm; int alive, sp; };
+// beam list, alive: 0 lost, 1 own, 2 handed to the rank below during the push (rem = z still to go), 3 adopted,
+// 4 slower than numerics.vz_min: leaves the beam list and streams in the current march from its (z, zeta)
+// streaming list, alive: 1 streaming, 0 lost, 5 trapped (reached the next level), 6 waiting (joins the march at
+// its zeta)
+enum Species { SP_BUNCH = 0, SP_TRAPPED = 1, SP_PLASMA = 2 };
 
 class Simulation {
 public:
@@ -93,6 +119,7 @@ public:
     bool finished() const { return s >= cfg.z_end - 1e-9 || stop_; }
     void diagnostics(FILE* f, bool header);        // collective; f is used on rank 0 only
     void dump_particles(const std::string& file);  // collective
+    void write_frame(const std::string& file);     // collective: fields in the planes y = 0 and x = 0 (GUI)
 
     // fields of level s1 (march with D = dz/2), or E_z, B_z, L of the stored R (D = 0)
     void solve_fields(double D);
@@ -136,6 +163,16 @@ public:
     Buf<Particle> parts;
     long np = 0;                            // particles in `parts`
     long lost_total = 0;
+    // plasma: streaming particles of the current march, the streaming current of level s0 per half-cell
+    // (spectra; the prediction of the next step), the current of one half-cell (real space, spectra), scratch
+    Buf<Particle> strm, strm_bk;
+    long nstrm = 0, fresh_last = 0, trapped_total = 0, restreamed_total = 0;
+    Buf<cpx> js0x, js0y, js0z, jsn, jsin, bk, sp3, jpred, jtmp, jsi0, dlt;
+    Buf<double> jsr;                         // jx, jy, jz, rho of one half-cell (real space)
+    Buf<double> rho_lines;                   // electron charge density of the streaming particles on the lines
+                                             // y = 0 (nx) and x = 0 (ny) of every half-cell [N][nx + ny]
+    std::vector<Particle> joining_;          // join the next march at their zeta (box coordinates)
+    std::vector<double> cfg_wlo_;            // host copy of wlo
 
     double total_field_energy();          // collective, code units
     std::vector<Particle> host_particles() const;
@@ -153,6 +190,14 @@ public:
     void window_shift_post();
     void shift_window(int nxs, int nys);
     double local_field_energy();
+    void setup_plasma();
+    void load_plasma(double s0, double s1, const std::vector<Particle>& joining);
+    void stream_spectra();
+    void march_slice(int n, double D);
+    void real_fields_slice(int n);
+    void march_plasma(double s0, double s1);
+    void collect_restreaming();
+    void add_grid_lasers();
 
 private:
     std::unique_ptr<FftMany> fft_;

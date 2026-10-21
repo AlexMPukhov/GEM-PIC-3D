@@ -57,6 +57,25 @@ void Config::y_table(const std::vector<double>& pts, const std::vector<double>& 
     Ly = ynode[ny] - ynode[0]; y_change = m.max_change();
 }
 
+double Config::plasma_density(double x, double y, double z) const {
+    if (!plasma_on) return 0;
+    const double r2 = x * x + y * y;
+    if (r2 >= r_max * r_max) return 0;
+    double f = 1;
+    if (!pz_points.empty()) {
+        if (z <= pz_points.front()) f = pz_values.front();
+        else if (z >= pz_points.back()) f = pz_values.back();
+        else {
+            size_t k = 1;
+            while (pz_points[k] < z) ++k;
+            const double t = (z - pz_points[k - 1]) / (pz_points[k] - pz_points[k - 1]);
+            f = (1 - t) * pz_values[k - 1] + t * pz_values[k];
+        }
+    }
+    const double g = parabolic ? 1 + channel_depth * r2 / (r_channel * r_channel) : 1.0;
+    return f * g > 0 ? n0 * f * g : 0.0;
+}
+
 Config Config::from_deck(const Deck& d) {
     Config c;
     c.lambda0 = d.num("grid", "lambda0", Kind::Length,
@@ -105,36 +124,107 @@ Config Config::from_deck(const Deck& d) {
     c.k_filter = d.flag("numerics", "k_filter", true);
     c.push_phase = d.num("numerics", "push_phase", Kind::Angle, 0.05);
 
-    if (d.has_block("laser")) {
-        c.laser_on = d.flag("laser", "enabled", true);
-        c.a0 = d.num("laser", "a0", Kind::None);
-        c.kL = c.lambda0 / d.num("laser", "wavelength", Kind::Length, c.lambda0);
-        c.theta = d.num("laser", "angle", Kind::Angle, 0.0);
-        c.tau = d.num("laser", "tau_fwhm", Kind::Time) / c.Tu;
-        c.cep = d.num("laser", "cep", Kind::Angle, 0.0);
-        c.pol = d.str("laser", "polarization", "s");
-        if (c.pol != "s" && c.pol != "p" && c.pol != "circular")
-            throw std::runtime_error("laser.polarization must be s, p or circular");
-        c.start_fwhm = d.num("laser", "start_fwhm", Kind::None, 3.5);
-        c.stop_fwhm = d.num("laser", "stop_fwhm", Kind::None, c.start_fwhm);   // 0: run to z_end
+    // laser blocks: laser, laser2, ... (type plane_wave: the analytic external wave, at most one; gaussian: on the grid)
+    for (int k = 1;; ++k) {
+        const std::string b = k == 1 ? "laser" : "laser" + std::to_string(k);
+        if (!d.has_block(b)) { if (k == 1) continue; break; }
+        const std::string type = d.str(b, "type", "plane_wave");
+        if (type == "plane_wave") {
+            if (c.laser_on || c.a0 != 0) throw std::runtime_error(b + ": only one laser of type plane_wave");
+            c.laser_on = d.flag(b, "enabled", true);
+            c.a0 = d.num(b, "a0", Kind::None);
+            c.kL = c.lambda0 / d.num(b, "wavelength", Kind::Length, c.lambda0);
+            c.theta = d.num(b, "angle", Kind::Angle, 0.0);
+            c.tau = d.num(b, "tau_fwhm", Kind::Time) / c.Tu;
+            c.cep = d.num(b, "cep", Kind::Angle, 0.0);
+            c.pol = d.str(b, "polarization", "s");
+            if (c.pol != "s" && c.pol != "p" && c.pol != "circular")
+                throw std::runtime_error(b + ".polarization must be s, p or circular");
+            c.start_fwhm = d.num(b, "start_fwhm", Kind::None, 3.5);
+            c.stop_fwhm = d.num(b, "stop_fwhm", Kind::None, c.start_fwhm);   // 0: run to z_end
+        } else if (type == "gaussian") {
+            if (!d.flag(b, "enabled", true)) continue;
+            GridLaser g;
+            g.a0 = d.num(b, "a0", Kind::None);
+            g.kL = c.lambda0 / d.num(b, "wavelength", Kind::Length, c.lambda0);
+            g.waist = L(b, "waist");
+            g.tau = d.num(b, "tau_fwhm", Kind::Time) / c.Tu;
+            g.zeta_c = L(b, "zeta_center");
+            g.z_focus = Ld(b, "z_focus", 0.0);
+            g.cep = d.num(b, "cep", Kind::Angle, 0.0);
+            const std::string pol = d.str(b, "polarization", "linear");
+            if (pol == "circular") g.circular = true;
+            else if (pol != "linear") throw std::runtime_error(b + ".polarization must be linear or circular");
+            g.pol_angle = d.num(b, "pol_angle", Kind::Angle, 0.0);
+            g.helicity = int(d.integer(b, "helicity", 1));
+            if (g.helicity != 1 && g.helicity != -1) throw std::runtime_error(b + ".helicity must be 1 or -1");
+            c.glasers.push_back(g);
+        } else throw std::runtime_error(b + ".type must be plane_wave or gaussian");
     }
-    c.charge = d.num("bunch", "charge", Kind::Charge);
-    c.gamma = d.num("bunch", "gamma", Kind::None);
-    c.sigx = L("bunch", "sigma_x"); c.sigy = Ld("bunch", "sigma_y", c.sigx); c.sigz = L("bunch", "sigma_z");
-    c.emitx = Ld("bunch", "emittance_x", 0); c.emity = Ld("bunch", "emittance_y", c.emitx);
-    c.espread = d.num("bunch", "energy_spread", Kind::None, 0.0);
-    c.zeta_center = Ld("bunch", "zeta_center", 0.75 * c.Lwin);
-    c.nmacro = d.integer("bunch", "macroparticles", 100000);
-    c.noise = d.str("bunch", "shot_noise", "random");
-    if (c.noise != "random" && c.noise != "fawley") throw std::runtime_error("bunch.shot_noise must be random or fawley");
-    c.noise_lambda = Ld("bunch", "noise_wavelength", 0);
-    c.beamlet = int(d.integer("bunch", "beamlet", 4));
-    c.seed = (unsigned long)d.integer("bunch", "seed", 1);
-    if (c.noise == "fawley" && (c.noise_lambda <= 0 || c.beamlet < 3 || c.nmacro % c.beamlet))
-        throw std::runtime_error("fawley noise: noise_wavelength > 0, beamlet >= 3, macroparticles a multiple of beamlet");
+    if (d.has_block("plasma")) {
+        c.plasma_on = true;
+        const std::string dn = d.str("plasma", "density");
+        if (dn.size() > 3 && dn.compare(dn.size() - 3, 3, "n_c") == 0)
+            c.n0 = parse_with_unit(dn.substr(0, dn.size() - 3), Kind::None, "plasma.density");
+        else c.n0 = d.num("plasma", "density", Kind::Density) / c.nc;
+        if (!(c.n0 > 0)) throw std::runtime_error("plasma.density must be positive");
+        if (d.has("plasma", "z_points") || d.has("plasma", "z_values")) {
+            c.pz_points = d.list("plasma", "z_points", Kind::Length);
+            for (double& v : c.pz_points) v /= c.Lu;
+            c.pz_values = d.list("plasma", "z_values", Kind::None);
+            if (c.pz_points.size() != c.pz_values.size() || c.pz_points.empty())
+                throw std::runtime_error("plasma: z_points and z_values need the same number of entries");
+            for (size_t k = 1; k < c.pz_points.size(); ++k)
+                if (!(c.pz_points[k] > c.pz_points[k - 1])) throw std::runtime_error("plasma.z_points must increase");
+        }
+        const std::string prof = d.str("plasma", "profile", "uniform");
+        if (prof == "parabolic") {
+            c.parabolic = true;
+            c.channel_depth = d.num("plasma", "channel_depth", Kind::None);
+            c.r_channel = L("plasma", "r_channel");
+        } else if (prof != "uniform") throw std::runtime_error("plasma.profile must be uniform or parabolic");
+        c.r_max = Ld("plasma", "r_max", 1e300);
+        c.ppc_x = int(d.integer("plasma", "ppc_x", 2)); c.ppc_y = int(d.integer("plasma", "ppc_y", c.ppc_x));
+        if (c.ppc_x < 1 || c.ppc_y < 1) throw std::runtime_error("plasma: ppc_x, ppc_y must be >= 1");
+        c.smooth_length = Ld("plasma", "smooth_length", 0.0);
+        if (c.smooth_length < 0) throw std::runtime_error("plasma.smooth_length must be >= 0");
+    }
+    c.iterations = int(d.integer("numerics", "iterations", 2));
+    c.vz_min = d.num("numerics", "vz_min", Kind::None, 0.8);
+    c.vz_beam = d.num("numerics", "vz_beam", Kind::None, 0.9);
+    c.trap_advance = d.num("numerics", "trap_advance", Kind::None, 1.0);
+    {
+        const std::string pr = d.str("numerics", "predictor", "extrapolate");
+        if (pr == "previous") c.predictor_extrapolate = false;
+        else if (pr != "extrapolate") throw std::runtime_error("numerics.predictor must be extrapolate or previous");
+    }
+    if (c.iterations < 1) throw std::runtime_error("numerics.iterations must be >= 1");
+    if (!(c.vz_min > 0 && c.vz_min < c.vz_beam && c.vz_beam < 1)) throw std::runtime_error("numerics: need 0 < vz_min < vz_beam < 1");
+    if (!(c.trap_advance >= 1)) throw std::runtime_error("numerics.trap_advance must be >= 1");
+    if ((c.plasma_on || !c.glasers.empty()) && !c.self_fields)
+        throw std::runtime_error("numerics.self_fields = false is for test particles in the analytic laser only (no plasma, no grid lasers)");
+    if (d.has_block("bunch")) {
+        c.charge = d.num("bunch", "charge", Kind::Charge);
+        c.gamma = d.num("bunch", "gamma", Kind::None);
+        c.sigx = L("bunch", "sigma_x"); c.sigy = Ld("bunch", "sigma_y", c.sigx); c.sigz = L("bunch", "sigma_z");
+        c.emitx = Ld("bunch", "emittance_x", 0); c.emity = Ld("bunch", "emittance_y", c.emitx);
+        c.espread = d.num("bunch", "energy_spread", Kind::None, 0.0);
+        c.zeta_center = Ld("bunch", "zeta_center", 0.75 * c.Lwin);
+        c.nmacro = d.integer("bunch", "macroparticles", 100000);
+        c.noise = d.str("bunch", "shot_noise", "random");
+        if (c.noise != "random" && c.noise != "fawley") throw std::runtime_error("bunch.shot_noise must be random or fawley");
+        c.noise_lambda = Ld("bunch", "noise_wavelength", 0);
+        c.beamlet = int(d.integer("bunch", "beamlet", 4));
+        c.seed = (unsigned long)d.integer("bunch", "seed", 1);
+        if (c.noise == "fawley" && (c.noise_lambda <= 0 || c.beamlet < 3 || c.nmacro % c.beamlet))
+            throw std::runtime_error("fawley noise: noise_wavelength > 0, beamlet >= 3, macroparticles a multiple of beamlet");
+    } else {
+        c.nmacro = 0; c.charge = 0; c.gamma = 1; c.zeta_center = 0.75 * c.Lwin;
+    }
     c.dir = d.str("output", "dir", "out");
     c.every = int(d.integer("output", "every", 10));
     c.dump_particles = d.flag("output", "particles", true);
+    c.frames = d.flag("output", "frames", false);
     d.check_unused();
     return c;
 }
@@ -164,6 +254,16 @@ void Config::summary(FILE* f, int ranks) const {
                  charge * 1e12, gamma, sigx * um, sigy * um, sigz * um, nmacro, noise.c_str());
     std::fprintf(f, "  push: RK4 in z, sub-step <= %.3g rad of laser phase\n", push_phase);
     std::fprintf(f, "  parallel: %s, %d MPI rank(s), transverse window lag %d steps\n", GEMPIC_GPU ? "CUDA" : "OpenMP", ranks, window_lag);
+    for (size_t k = 0; k < glasers.size(); ++k)
+        std::fprintf(f, "  grid laser %zu: a0 = %g, lambda = %.4g um, waist = %.4g um, tau_FWHM = %.4g fs, centre at zeta = %.4g um, focus at z = %.4g um, %s\n",
+                     k + 1, glasers[k].a0, lambda0 / glasers[k].kL * 1e6, glasers[k].waist * um, glasers[k].tau * Tu * 1e15,
+                     glasers[k].zeta_c * um, glasers[k].z_focus * um, glasers[k].circular ? "circular" : "linear");
+    if (plasma_on)
+        std::fprintf(f, "  plasma: n0 = %.4g cm^-3 (%.4g n_c), %s, r_max = %.4g um, %d x %d per cell, smooth_length %.4g um; %d passes per slice, predictor %s, vz_min %.3g, vz_beam %.3g\n",
+                     n0 * nc * 1e-6, n0, parabolic ? "parabolic channel" : "uniform", r_max < 1e299 ? r_max * um : -1.0, ppc_x, ppc_y,
+                     smooth_length * um, iterations, predictor_extrapolate ? "extrapolate" : "previous", vz_min, vz_beam);
+    std::fprintf(f, "  output: dir '%s', every %d steps (%ld steps to z_end)%s\n", dir.c_str(), every,
+                 long(std::ceil(z_end / dz - 1e-9)), frames ? ", frames" : "");
     std::fprintf(f, "  self fields %s, zeta filter %s, transverse filter %s\n", self_fields ? "on" : "off", zeta_filter ? "on" : "off",
                  k_filter ? "on" : "off");
 }
@@ -219,6 +319,7 @@ Simulation::Simulation(const Config& c, Comm& cm) : cfg(c), comm(cm) {
     laser.kx = std::sin(cfg.theta); laser.kz = std::cos(cfg.theta);
     laser.pol = cfg.pol == "s" ? 0 : cfg.pol == "p" ? 1 : 2;
     laser.eta_c = cfg.start_fwhm * cfg.tau;   // the bunch centre starts at eta = 0
+    setup_plasma();
 }
 
 // Fourier y: k_y per iy as for x, all components on the nodes j*dy of the box (physical y = j*dy + Y0).
@@ -321,7 +422,7 @@ void Simulation::setup_zeta() {
         lo[n] = hp / (hm + hp); hi[n] = hm / (hm + hp);
         ws[n] = 0.5 * ((n > 0 ? hh[n - 1] : 0) + (n < N - 1 ? hh[n] : 0));
     }
-    zs.upload(Z); hcg.upload(g); wlo.upload(lo); whi.upload(hi); wsl.upload(ws);
+    zs.upload(Z); hcg.upload(g); wlo.upload(lo); whi.upload(hi); wsl.upload(ws); cfg_wlo_ = lo;
     zax.X = zs.data(); zax.n = N; zax.uniform = uni; zax.x0 = 0; zax.ih = 1 / hh[0];
 }
 
@@ -381,6 +482,7 @@ void Simulation::load_bunch() {
             p.x = x - vx * zz / vz + 0.5 * cfg.Lx; p.y = y - vy * zz / vz + yoff;
             p.zeta = cfg.zeta_center + zz / vz;
             p.px = px; p.py = py; p.pz = pz; p.w = W; p.alive = 1;
+            p.q = q; p.qm = q; p.sp = SP_BUNCH; p.z = 0;
             int hc; double f;
             zh.locate(p.zeta, hc, f);
             if (p.zeta < 0 || hc > N - 2 || p.y < ylo || p.y > yhi) { if (comm.rank == 0) ++lost_total; continue; }
@@ -396,7 +498,7 @@ namespace {
 struct PushCtx {
     const float* F; int a, ns, N, nx, ny, nk, self, yf; double dx, dy, Lx, Ly;
     Axis zax, yax;
-    Laser laser; double X0, zc, dz_push, push_phase, zhand, zmax, ylo, yhi, s1;
+    Laser laser; double X0, zc, dz_push, push_phase, zhand, zmax, ylo, yhi, s1, vz_min;
 };
 struct State { double x, y, zeta, px, py, pz; };
 
@@ -455,7 +557,7 @@ HD inline void gather(const PushCtx& c, double x, double y, double zeta, double 
 }
 // Characteristics with z as the independent variable: dr/dz = p/p_z, dzeta/dz = -(gamma - p_z)/p_z,
 // dp/dz = q (gamma E + p x B)/p_z, with gamma - p_z = (1 + p_perp^2)/(gamma + p_z).
-HD inline bool rhs(const PushCtx& c, const State& Y, double z, State& d) {
+HD inline bool rhs(const PushCtx& c, const State& Y, double z, double qm, State& d) {
     const double g = ::sqrt(1 + Y.px * Y.px + Y.py * Y.py + Y.pz * Y.pz);
     if (Y.pz < 0.3 * g) return false;
     const double gm = (1 + Y.px * Y.px + Y.py * Y.py) / (g + Y.pz);
@@ -465,9 +567,9 @@ HD inline bool rhs(const PushCtx& c, const State& Y, double z, State& d) {
     for (int k = 0; k < 3; ++k) { E[k] += Ee[k]; B[k] += Be[k]; }
     const double ip = 1 / Y.pz;
     d.x = Y.px * ip; d.y = Y.py * ip; d.zeta = -gm * ip;
-    d.px = q * (g * E[0] + Y.py * B[2] - Y.pz * B[1]) * ip;
-    d.py = q * (g * E[1] + Y.pz * B[0] - Y.px * B[2]) * ip;
-    d.pz = q * (g * E[2] + Y.px * B[1] - Y.py * B[0]) * ip;
+    d.px = qm * (g * E[0] + Y.py * B[2] - Y.pz * B[1]) * ip;
+    d.py = qm * (g * E[1] + Y.pz * B[0] - Y.px * B[2]) * ip;
+    d.pz = qm * (g * E[2] + Y.px * B[1] - Y.py * B[0]) * ip;
     return true;
 }
 HD inline State axpy(const State& a, double h, const State& b) {
@@ -485,6 +587,12 @@ HD inline void push_one(const PushCtx& c, Particle& p, double z0) {
             p.alive = 2; p.rem = c.s1 - z;
             return;
         }
+        if (c.vz_min > 0 && Y.pz < c.vz_min * ::sqrt(1 + Y.px * Y.px + Y.py * Y.py + Y.pz * Y.pz)) {
+            // too slow for the beam list: streams in the current march from (z, zeta)
+            p.x = Y.x; p.y = Y.y; p.zeta = Y.zeta; p.px = Y.px; p.py = Y.py; p.pz = Y.pz; p.z = z;
+            p.alive = 4;
+            return;
+        }
         double ds = c.dz_push < c.s1 - z ? c.dz_push : c.s1 - z;
         if (c.laser.on) {
             const double g = ::sqrt(1 + Y.px * Y.px + Y.py * Y.py + Y.pz * Y.pz);
@@ -493,8 +601,9 @@ HD inline void push_one(const PushCtx& c, Particle& p, double z0) {
             if (lim < ds) ds = (c.s1 - z) / ::ceil((c.s1 - z) / lim);
         }
         State k1, k2, k3, k4;
-        if (!(rhs(c, Y, z, k1) && rhs(c, axpy(Y, 0.5 * ds, k1), z + 0.5 * ds, k2) &&
-              rhs(c, axpy(Y, 0.5 * ds, k2), z + 0.5 * ds, k3) && rhs(c, axpy(Y, ds, k3), z + ds, k4))) {
+        const double qm = p.qm;
+        if (!(rhs(c, Y, z, qm, k1) && rhs(c, axpy(Y, 0.5 * ds, k1), z + 0.5 * ds, qm, k2) &&
+              rhs(c, axpy(Y, 0.5 * ds, k2), z + 0.5 * ds, qm, k3) && rhs(c, axpy(Y, ds, k3), z + ds, qm, k4))) {
             p.alive = 0;
             return;
         }
@@ -505,7 +614,7 @@ HD inline void push_one(const PushCtx& c, Particle& p, double z0) {
         Y.pz += w * (k1.pz + 2 * k2.pz + 2 * k3.pz + k4.pz);
         z += ds;
     }
-    p.x = Y.x; p.y = Y.y; p.zeta = Y.zeta; p.px = Y.px; p.py = Y.py; p.pz = Y.pz;   // continuous coordinates
+    p.x = Y.x; p.y = Y.y; p.zeta = Y.zeta; p.px = Y.px; p.py = Y.py; p.pz = Y.pz; p.z = c.s1;   // continuous coordinates
     // lost: out of the window in zeta, or within one cell of a wall in y
     p.alive = (p.zeta < 0 || p.zeta >= c.zmax || p.y < c.ylo || p.y > c.yhi) ? 0 : 1;
     // a particle that ends the step in the half-cells of the rank below belongs to that rank
@@ -520,7 +629,7 @@ void Simulation::push(double s0, double s1, long i0, long i1) {
     c.yf = yf; c.dx = dx; c.dy = dy; c.Lx = cfg.Lx; c.Ly = cfg.Ly; c.zax = zax; c.yax = yax; c.laser = laser; c.X0 = X0;
     c.zc = cfg.zeta_center; c.dz_push = cfg.dz_push; c.push_phase = cfg.push_phase;
     c.zhand = comm.rank == 0 ? -1e300 : cfg.zeta[a + 1];
-    c.zmax = cfg.zeta[N - 1]; c.s1 = s1;
+    c.zmax = cfg.zeta[N - 1]; c.s1 = s1; c.vz_min = cfg.plasma_on ? cfg.vz_min : 0;
     c.ylo = yf ? -1e300 : cfg.ynode[1]; c.yhi = yf ? 1e300 : cfg.ynode[cfg.ny - 1];
     Particle* P = parts.data();
     par_for(i1 - i0, [=] HD(long k) {
@@ -580,7 +689,7 @@ void Simulation::currents() {
         if (hw < 0 || hw >= nh || m < 0 || m > Ng - 2) return;
         const double g = ::sqrt(1 + p.px * p.px + p.py * p.py + p.pz * p.pz);
         const double vx = p.px / g, vy = p.py / g, vz = p.pz / g;
-        const double f = q * p.w / (hc[m + 2] * dx_);
+        const double f = p.q * p.w / (hc[m + 2] * dx_);
         int ix[3], jn[3], jh[3]; double wx[3], wn[3], wh[3];
         tsc(p.x, dx_, nx, ix, wx);
         if (yfo) {                                   // Fourier y: all components on the periodic nodes
@@ -648,15 +757,16 @@ void Simulation::currents() {
     fft_->run(jkz.data(), ns + 1, false);
     cpx* jx = jkx.data(); cpx* jy = jky.data();
     const double* fl = filt.data();
+    const bool keep0 = cfg.plasma_on;     // with plasma the k = 0 current is a 1D plasma wave, not a net current
     if (yfo) {
-        // Fourier y: unpack the pair, apply the transverse filter (zero at k = 0 and at the Nyquist modes)
+        // Fourier y: unpack the pair, apply the transverse filter (zero at the Nyquist modes, and at k = 0 in vacuum)
         const double* fly = filty.data();
         par_for(long(ns + 1) * nk, [=] HD(long idx) {
             const long i = idx % nkk, base = idx - i;
             const int ixx = int(i % nx), j = int(i / nx);
             const long m = base + long((ny - j) % ny) * nx + (nx - ixx) % nx;
             const cpx z = s1[idx], zm = conj(s1[m]);
-            const double f = (ixx == 0 && j == 0) ? 0.0 : fl[ixx] * fly[j];
+            const double f = (ixx == 0 && j == 0 && !keep0) ? 0.0 : fl[ixx] * fly[j];
             jx[idx] = f * (0.5 * (z + zm)); jy[idx] = f * (0.5 * C((z - zm).im, -(z - zm).re)); jz[idx] = f * jz[idx];
         });
         device_sync();
@@ -697,7 +807,7 @@ void Simulation::currents() {
             }
         }
         cpx mean = C(0);
-        if (ixx == 0) {
+        if (ixx == 0 && !keep0) {
             for (int j = 0; j < ny; ++j) mean = mean + jy[o + long(j) * nx] / id[j];
             mean = mean / Ly;
         }
@@ -1215,6 +1325,7 @@ void Simulation::init() {
     if (cfg.self_fields) {
         currents();
         comoving_field();
+        add_grid_lasers();
         march(0.0);                 // E_z, B_z, L of the co-moving R; the sponge acts as in every step
         sponge_and_real_fields();
         const long n = long(ns + 1) * nk;
@@ -1230,8 +1341,17 @@ void Simulation::step() {
     window_shift_start();
     push(s, s + cfg.dz, 0, np);
     exchange_particles(s + cfg.dz);
+    if (cfg.plasma_on) collect_restreaming();
     s += cfg.dz; ++istep;
-    if (cfg.self_fields) solve_fields(0.5 * cfg.dz);
+    if (cfg.self_fields && cfg.plasma_on) {
+        currents();
+        march_plasma(s - cfg.dz, s);
+        sponge_and_real_fields();
+        const long n = long(ns + 1) * nk;
+        cpx* a0 = j0x.data(); cpx* b0 = j0y.data(); const cpx* a1 = jkx.data(); const cpx* b1 = jky.data();
+        par_for(n, [=] HD(long i) { a0[i] = a1[i]; b0[i] = b1[i]; });
+        device_sync();
+    } else if (cfg.self_fields) solve_fields(0.5 * cfg.dz);
     window_shift_post();
     comm.wait_sends();
 }
@@ -1246,7 +1366,7 @@ void Simulation::window_shift_post() {
     const Particle* P = parts.data();
     const double x0 = X0, y0 = Y0;
     par_for(np, [=] HD(long i) {
-        if (P[i].alive != 1) return;
+        if (P[i].alive != 1 || P[i].sp != SP_BUNCH) return;
         atomic_add(&A[0], P[i].w * (P[i].x + x0)); atomic_add(&A[1], P[i].w * (P[i].y + y0)); atomic_add(&A[2], P[i].w);
     });
     device_sync();
@@ -1271,6 +1391,7 @@ void Simulation::shift_window(int nxs, int nys) {
     const double sx = nxs * dx, sy = nys * dy;
     Particle* P = parts.data();
     par_for(np, [=] HD(long i) { P[i].x -= sx; P[i].y -= sy; });
+    for (auto& p : joining_) { p.x -= sx; p.y -= sy; }
     if (cfg.self_fields) {
         const long nkk = nk;
         const int nx = cfg.nx, ny = cfg.ny;
@@ -1284,6 +1405,7 @@ void Simulation::shift_window(int nxs, int nys) {
             });
         };
         rot(Rx); rot(Ry); rot(Ez); rot(Bz); rot(j0x); rot(j0y);
+        if (cfg.plasma_on) { rot(js0x); rot(js0y); rot(js0z); }
         Buf<float> tmp(F.size());
         float* t = tmp.data(); const float* f = F.data();
         par_for(long(F.size()), [=] HD(long idx) {
@@ -1302,10 +1424,11 @@ void Simulation::shift_window(int nxs, int nys) {
 void Simulation::diagnostics(FILE* f, bool header) {
     if (header && comm.rank == 0)
         for (FILE* out : {f, stdout}) if (out) std::fprintf(out, "# step  z[mm]  N_alive  <x>[um] <y>[um] <zeta>[um]  rms_x rms_y rms_zeta[um]  <px> <py> <pz> <gamma> "
-                        "<p.khat>  rms_pz  eta_rel[FWHM] a_env  W_field[J] W_kin[J]\n");
-    double S[17] = {0};
+                        "<p.khat>  rms_pz  eta_rel[FWHM] a_env  W_field[J] W_kin[J]  N_trapped Q_trapped[pC]\n");
+    double S[19] = {0};
     for (auto& p : host_particles()) {
         if (p.alive != 1) continue;
+        if (p.sp != SP_BUNCH) { S[17] += 1; S[18] += p.q * p.w; continue; }   // trapped plasma electrons
         const double g = std::sqrt(1 + p.px * p.px + p.py * p.py + p.pz * p.pz);
         const double X = p.x + X0, Y = p.y + Y0;
         const double et = laser.eta(X, s, s - (p.zeta - cfg.zeta_center));
@@ -1316,7 +1439,7 @@ void Simulation::diagnostics(FILE* f, bool header) {
     }
     S[15] = cfg.self_fields ? local_field_energy() : 0;
     S[16] = double(lost_total);
-    comm.allreduce_sum(S, 17);
+    comm.allreduce_sum(S, 19);
     field_energy = S[15];
     const double w = S[0] > 0 ? S[0] : 1;
     auto m = [&](int k) { return S[k] / w; };
@@ -1329,10 +1452,11 @@ void Simulation::diagnostics(FILE* f, bool header) {
     const double Efield = me_SI * c_SI * c_SI / (cfg.Lu * e_SI);
     const double Wf = field_energy * eps0 * Efield * Efield * std::pow(cfg.Lu, 3);
     const double Wk = S[14] * W_macro_ne * (m(10) - 1) * me_SI * c_SI * c_SI;
-    char line[512];
-    std::snprintf(line, sizeof line, "%6ld %10.5f %8ld %10.4f %10.4f %10.4f %9.4f %9.4f %9.4f %12.6e %12.6e %14.8e %14.8e %14.8e %11.4e %8.4f %8.4f %11.4e %11.4e\n",
+    const double Qtr = S[18] * cfg.nc * std::pow(cfg.Lu, 3) * e_SI * 1e12;
+    char line[600];
+    std::snprintf(line, sizeof line, "%6ld %10.5f %8ld %10.4f %10.4f %10.4f %9.4f %9.4f %9.4f %12.6e %12.6e %14.8e %14.8e %14.8e %11.4e %8.4f %8.4f %11.4e %11.4e %8ld %11.4e\n",
                  istep, s * cfg.Lu * 1e3, long(S[14]), m(1) * um, m(2) * um, m(3) * um, rms(1, 4) * um, rms(2, 5) * um,
-                 rms(3, 6) * um, m(7), m(8), m(9), m(10), m(11), rms(9, 12), eta_rel, aenv, Wf, Wk);
+                 rms(3, 6) * um, m(7), m(8), m(9), m(10), m(11), rms(9, 12), eta_rel, aenv, Wf, Wk, long(S[17]), Qtr);
     for (FILE* out : {f, stdout}) if (out) { std::fputs(line, out); std::fflush(out); }
 }
 
@@ -1381,4 +1505,594 @@ void Simulation::dump_particles(const std::string& file) {
     for (size_t k = 0; k < n; ++k)
         o << d[6 * k] * um << ' ' << d[6 * k + 1] * um << ' ' << d[6 * k + 2] * um << ' ' << d[6 * k + 3] << ' '
           << d[6 * k + 4] << ' ' << d[6 * k + 5] << '\n';
+}
+
+// ================================================================ plasma (streaming particles, as in GEM-PIC-RZ)
+// Per step s0 -> s1 with plasma (single rank):
+//  1. push the beam list (bunch + trapped electrons) to s1 in the fields of level s0; particles slower than
+//     vz_min leave it and stream in this march from their (z, zeta)
+//  2. deposit the beam current of level s1 (all half-cells), spectra
+//  3. load fresh plasma at the front of the window; march from the front to the rear. Per half-cell n, in
+//     `iterations` passes: push the streaming particles from zeta_{n+1} to zeta_n (Boris, dt = h/(1 - v_z)) in
+//     the fields of slice n+1 (final, level s1) and slice n (level s0 in the first pass, the last solution
+//     after that), deposit their current W = q w dt/Delta, smooth it (plasma.smooth_length), solve slice n.
+//     The current of half-cell n-1 needed by R at slice n is predicted as beam(s1) + streaming(s0); once
+//     half-cell n is final, R at slice n+1 is corrected for the difference.
+//  4. streaming particles that reach z = s1 + (trap_advance - 1) dz are trapped: they join the beam list if
+//     v_z >= vz_beam, otherwise they stream again in the next step from their zeta
+//  5. sponge, real fields
+namespace {
+HD inline void boris(double& ux, double& uy, double& uz, const double E[3], const double B[3], double qm, double dt) {
+    const double qh = 0.5 * qm * dt;
+    const double umx = ux + qh * E[0], umy = uy + qh * E[1], umz = uz + qh * E[2];
+    const double gm = ::sqrt(1.0 + umx * umx + umy * umy + umz * umz);
+    const double tx = qh * B[0] / gm, ty = qh * B[1] / gm, tz = qh * B[2] / gm;
+    const double t2 = tx * tx + ty * ty + tz * tz;
+    const double upx = umx + (umy * tz - umz * ty), upy = umy + (umz * tx - umx * tz), upz = umz + (umx * ty - umy * tx);
+    const double sf = 2.0 / (1.0 + t2);
+    const double vx = umx + sf * (upy * tz - upz * ty), vy = umy + sf * (upz * tx - upx * tz), vz = umz + sf * (upx * ty - upy * tx);
+    ux = vx + qh * E[0]; uy = vy + qh * E[1]; uz = vz + qh * E[2];
+}
+
+struct StreamCtx {
+    PushCtx pc;                 // fields (gather), laser, grids
+    const double* zs;           // slice positions
+    double* J;                  // real current plane of the half-cell: jx, jy, jz (3 nk)
+    const double *ia, *id;      // 1/A_j, 1/Delta_j (Fourier y: 1/dy)
+    double Delta, s1, sTrap, vz_beam;
+    int n;
+};
+
+// TSC deposit of q w (dt / Delta) v / (h dx dy) at (x, y) into the half-cell plane (box coordinates)
+HD inline void stream_deposit(const StreamCtx& c, double x, double y, double f, double vx, double vy, double vz) {
+    const PushCtx& P = c.pc;
+    int ix_[3], jn[3], jh[3]; double wx[3], wn[3], wh[3];
+    tsc(x, P.dx, P.nx, ix_, wx);
+    const long nk = P.nk;
+    if (P.yf) {
+        tsc(y, P.dy, P.ny, jn, wn);
+        for (int v = 0; v < 3; ++v)
+            for (int u = 0; u < 3; ++u) {
+                const long k = long(jn[v]) * P.nx + ix_[u];
+                const double w = f * wx[u] * wn[v] * c.ia[0];
+                atomic_add(&c.J[k], w * vx); atomic_add(&c.J[nk + k], w * vy); atomic_add(&c.J[2 * nk + k], w * vz);
+                atomic_add(&c.J[3 * nk + k], w);
+            }
+        return;
+    }
+    tsc_y(P.yax, y, jn, wn, jh, wh);
+    for (int v = 0; v < 3; ++v) {
+        const bool nod = jn[v] >= 1 && jn[v] <= P.ny - 1, hal = jh[v] >= 0 && jh[v] <= P.ny - 1;
+        for (int u = 0; u < 3; ++u) {
+            if (nod) {
+                const long k = long(jn[v]) * P.nx + ix_[u];
+                const double w = f * wx[u] * wn[v] * c.ia[jn[v]];
+                atomic_add(&c.J[k], w * vx); atomic_add(&c.J[2 * nk + k], w * vz); atomic_add(&c.J[3 * nk + k], w);
+            }
+            if (hal) {
+                const long k = long(jh[v]) * P.nx + ix_[u];
+                atomic_add(&c.J[nk + k], f * wx[u] * wh[v] * c.id[jh[v]] * vy);
+            }
+        }
+    }
+}
+
+// one streaming particle through half-cell n (from its zeta, normally zeta_{n+1}, to zeta_n)
+HD inline void stream_one(const StreamCtx& c, Particle& p) {
+    const int n = c.n;
+    const double zn = c.zs[n], zn1 = c.zs[n + 1], h = zn1 - zn;
+    if (p.alive == 6) {             // waiting: joins the march inside the half-cell that holds its zeta
+        if (p.zeta > zn) p.alive = 1;
+        else return;
+    }
+    if (p.alive != 1) return;
+    const double hl = p.zeta >= zn1 - 1e-9 * h ? h : (p.zeta - zn > 0 ? p.zeta - zn : 0.0);
+    const PushCtx& P = c.pc;
+    const double g0 = ::sqrt(1 + p.px * p.px + p.py * p.py + p.pz * p.pz);
+    const double omv0 = (1 + p.px * p.px + p.py * p.py) / (g0 * (g0 + p.pz));    // 1 - v_z, no cancellation
+    const double dt0 = hl / omv0;
+    const double xm = p.x + 0.5 * dt0 * p.px / g0, ym = p.y + 0.5 * dt0 * p.py / g0;
+    const double zm = p.z + 0.5 * dt0 * p.pz / g0, zetam = p.zeta - 0.5 * hl;
+    double E[3], B[3], Ee[3], Be[3];
+    gather(P, ::fmod(::fmod(xm, P.Lx) + P.Lx, P.Lx), P.yf ? ::fmod(::fmod(ym, P.Ly) + P.Ly, P.Ly) : ym, zetam, E, B);
+    P.laser.field(xm + P.X0, zm, zm - (zetam - P.zc), Ee, Be);
+    for (int k = 0; k < 3; ++k) { E[k] += Ee[k]; B[k] += Be[k]; }
+    double ux = p.px, uy = p.py, uz = p.pz;
+    boris(ux, uy, uz, E, B, p.qm, dt0);
+    double g1 = ::sqrt(1 + ux * ux + uy * uy + uz * uz);
+    double dt = 2 * hl / (omv0 + (1 + ux * ux + uy * uy) / (g1 * (g1 + uz)));    // time for |dzeta| = hl
+    ux = p.px; uy = p.py; uz = p.pz;
+    boris(ux, uy, uz, E, B, p.qm, dt);
+    g1 = ::sqrt(1 + ux * ux + uy * uy + uz * uz);
+    double vx = 0.5 * (p.px / g0 + ux / g1), vy = 0.5 * (p.py / g0 + uy / g1), vz = 0.5 * (p.pz / g0 + uz / g1);
+    double zeta_end = zn;
+    bool trapped = false;
+    if (p.z + vz * dt >= c.sTrap) {    // advanced trap_advance steps inside this half-cell: trapped
+        const double dtp = (c.sTrap - p.z) / (vz > 1e-3 ? vz : 1e-3) > 0 ? (c.sTrap - p.z) / (vz > 1e-3 ? vz : 1e-3) : 0.0;
+        ux = p.px; uy = p.py; uz = p.pz;
+        boris(ux, uy, uz, E, B, p.qm, dtp);
+        g1 = ::sqrt(1 + ux * ux + uy * uy + uz * uz);
+        vx = 0.5 * (p.px / g0 + ux / g1); vy = 0.5 * (p.py / g0 + uy / g1); vz = 0.5 * (p.pz / g0 + uz / g1);
+        dt = dtp;
+        zeta_end = p.zeta - (1 - vz) * dtp;
+        trapped = true;
+    }
+    const double xo = p.x, yo = p.y;
+    p.x += vx * dt; p.y += vy * dt;
+    p.z = trapped ? c.s1 : p.z + vz * dt;
+    p.px = ux; p.py = uy; p.pz = uz;
+    p.zeta = zeta_end;
+    // streaming current: q w dt / Delta per unit time, into half-cell n
+    const double f = p.q * p.w * dt / (c.Delta * h * P.dx);
+    stream_deposit(c, 0.5 * (xo + p.x), 0.5 * (yo + p.y), f, vx, vy, vz);
+    if (!P.yf && (p.y < P.ylo || p.y > P.yhi)) { p.alive = 0; return; }
+    if (trapped) {
+        p.alive = 5;
+        const double vze = uz / g1;
+        if (vze >= c.vz_beam)        // joins the beam list: its beam current of level s1 from now on
+            stream_deposit(c, p.x, p.y, p.q * p.w / (h * P.dx * vze), ux / g1, uy / g1, vze);
+    }
+}
+}  // namespace
+
+void Simulation::setup_plasma() {
+    if (!cfg.plasma_on) return;
+    if (comm.size > 1) throw std::runtime_error("plasma: MPI along zeta is not available with plasma yet (run on one rank)");
+    const size_t pl = size_t(nk);
+    for (Buf<cpx>* p : {&js0x, &js0y, &js0z}) p->resize((ns + 1) * pl);
+    jsr.resize(4 * pl);
+    rho_lines.resize(size_t(N) * (cfg.nx + cfg.ny));
+    jsn.resize(3 * pl); jsin.resize(3 * pl); bk.resize(4 * pl); sp3.resize(3 * pl);
+    jpred.resize(3 * pl); jtmp.resize(3 * pl); jsi0.resize(3 * pl); dlt.resize(3 * pl);
+    if (!yf && scp.size() == 0) {
+        for (Buf<cpx>* p : {&sRx, &sRy, &sLx, &sLy, &srhs}) p->resize(pl);
+        scp.resize(pl);
+    }
+}
+
+// fresh plasma at the front of the window (a regular lattice of ppc_x x ppc_y particles per cell), and the
+// particles that join the march at their zeta
+void Simulation::load_plasma(double s0, double s1, const std::vector<Particle>& joining) {
+    std::vector<Particle> v;
+    const double zmid = 0.5 * (s0 + s1), Delta = s1 - s0;
+    const int nx = cfg.nx, ny = cfg.ny, px = cfg.ppc_x, py = cfg.ppc_y;
+    const double zf = cfg.zeta[N - 1];
+    for (int j = 0; j < ny; ++j) {
+        double y0, hy;
+        if (yf) { y0 = j * dy; hy = dy; }
+        else {
+            if (j == 0 || j == ny - 1) continue;          // no plasma in the cells at the walls
+            y0 = cfg.ynode[j]; hy = cfg.ynode[j + 1] - cfg.ynode[j];
+        }
+        for (int i = 0; i < nx; ++i)
+            for (int b2 = 0; b2 < py; ++b2)
+                for (int a2 = 0; a2 < px; ++a2) {
+                    Particle p{};
+                    p.x = (i + (a2 + 0.5) / px) * dx;
+                    p.y = y0 + (b2 + 0.5) / py * hy;
+                    const double n = cfg.plasma_density(p.x + X0, p.y + Y0, zmid);
+                    if (n <= 0) continue;
+                    p.w = n * dx * hy * Delta / (px * py);
+                    p.q = -1; p.qm = -1; p.sp = SP_PLASMA; p.alive = 1;
+                    p.zeta = zf; p.z = s0;
+                    v.push_back(p);
+                }
+    }
+    fresh_last = long(v.size());
+    for (Particle p : joining) { p.alive = 6; v.push_back(p); }
+    nstrm = long(v.size());
+    if (strm.size() < v.size()) { strm.resize(v.size() + v.size() / 8 + 64); strm_bk.resize(strm.size()); }
+    strm.from_host(v.data(), 0, v.size());
+}
+
+// spectra of the streaming current of one half-cell (jsr) into jsn: transverse filters as for the beam, the
+// k = 0 part kept, and the smoothing (1 - a^2 lap_perp)^-1 of plasma.smooth_length
+void Simulation::stream_spectra() {
+    const long nkk = nk;
+    const int nx = cfg.nx, ny = cfg.ny;
+    const double* J = jsr.data();
+    cpx* pk = sp3.data();                       // plane 0: jx + i jy, plane 1: jz
+    par_for(nk, [=] HD(long i) { pk[i] = C(J[i], J[nkk + i]); pk[nkk + i] = C(J[2 * nkk + i], 0); });
+    fft_->run(pk, 2, false);
+    cpx* ox = jsn.data(); cpx* oy = ox + nkk; cpx* oz = ox + 2 * nkk;
+    const double* fl = filt.data();
+    const double* kxs_ = kxs.data();
+    const double a2 = cfg.smooth_length * cfg.smooth_length;
+    if (yf) {
+        const double* fly = filty.data(); const double* kys_ = kys.data();
+        par_for(nk, [=] HD(long i) {
+            const int ixx = int(i % nx), j = int(i / nx);
+            const long m = long((ny - j) % ny) * nx + (nx - ixx) % nx;
+            const cpx z = pk[i], zm = conj(pk[m]);
+            const double k2 = kxs_[ixx] * kxs_[ixx] + kys_[j] * kys_[j];
+            const double f = fl[ixx] * fly[j] / (1 + a2 * k2);
+            ox[i] = f * (0.5 * (z + zm)); oy[i] = f * (0.5 * C((z - zm).im, -(z - zm).re)); oz[i] = f * pk[nkk + i];
+        });
+        device_sync();
+        return;
+    }
+    par_for(nk, [=] HD(long i) {
+        const int ixx = int(i % nx);
+        const long m = i - ixx + (nx - ixx) % nx;
+        const cpx z = pk[i], zm = conj(pk[m]);
+        ox[i] = 0.5 * (z + zm); oy[i] = 0.5 * C((z - zm).im, -(z - zm).re); oz[i] = pk[nkk + i];
+    });
+    const double* ia = iA.data(); const double* id = iD.data();
+    const bool kf = cfg.k_filter;
+    cpx* rhs = srhs.data(); double* cpv = scp.data();
+    par_for(nx, [=] HD(long line) {
+        const int ixx = int(line);
+        const long o = ixx;
+        const double fx = fl[ixx];
+        if (kf) {                                         // (1,2,1)/4 on the cell charges, as for the beam
+            cpx* const nodal[2] = {ox, oz};
+            for (int t = 0; t < 2; ++t) {
+                cpx* A = nodal[t];
+                cpx qm = C(0), q0 = A[o + nx] / ia[1];
+                for (int j = 1; j < ny; ++j) {
+                    const cpx qp = j + 1 < ny ? A[o + long(j + 1) * nx] / ia[j + 1] : C(0);
+                    A[o + long(j) * nx] = (0.25 * qm + 0.5 * q0 + 0.25 * qp) * ia[j];
+                    qm = q0; q0 = qp;
+                }
+            }
+            cpx qm = oy[o] / id[0], q0 = qm;
+            for (int j = 0; j < ny; ++j) {
+                const cpx qp = j + 1 < ny ? oy[o + long(j + 1) * nx] / id[j + 1] : q0;
+                oy[o + long(j) * nx] = (0.25 * qm + 0.5 * q0 + 0.25 * qp) * id[j];
+                qm = q0; q0 = qp;
+            }
+        }
+        ox[o] = C(0); oz[o] = C(0);
+        for (int j = 0; j < ny; ++j) {
+            const long k = o + long(j) * nx;
+            ox[k] = fx * ox[k]; oy[k] = fx * oy[k]; oz[k] = fx * oz[k];
+        }
+        if (a2 <= 0) return;
+        const double kx2 = kxs_[ixx] * kxs_[ixx];
+        // nodes (j_x, j_z): (1 + a^2 (k_x^2 - b- b+)) f = g, f = 0 at the walls (as E_z in the march)
+        cpx* const nodal[2] = {ox, oz};
+        for (int t = 0; t < 2; ++t) {
+            cpx* A = nodal[t];
+            double cp = 0; cpx dp = C(0);
+            for (int j = 1; j < ny; ++j) {
+                const double lo = j > 1 ? -a2 * ia[j] * id[j - 1] : 0, up = j < ny - 1 ? -a2 * ia[j] * id[j] : 0;
+                const double den = 1 + a2 * kx2 + a2 * ia[j] * (id[j - 1] + id[j]) - lo * cp;
+                dp = (A[o + long(j) * nx] - lo * dp) / den;
+                cp = up / den;
+                rhs[o + long(j) * nx] = dp; cpv[o + long(j) * nx] = cp;
+            }
+            cpx next = C(0);
+            for (int j = ny - 1; j >= 1; --j) { next = rhs[o + long(j) * nx] - cpv[o + long(j) * nx] * next; A[o + long(j) * nx] = next; }
+        }
+        // half-nodes (j_y): (1 + a^2 (k_x^2 - b+ b-)) f = g (as B_z in the march)
+        double cp = 0; cpx dp = C(0);
+        for (int j = 0; j < ny; ++j) {
+            const double al = j > 0 ? ia[j] : 0, au = j < ny - 1 ? ia[j + 1] : 0;
+            const double lo = -a2 * id[j] * al, up = -a2 * id[j] * au;
+            const double den = 1 + a2 * kx2 + a2 * id[j] * (al + au) - lo * cp;
+            dp = (oy[o + long(j) * nx] - lo * dp) / den;
+            cp = up / den;
+            rhs[o + long(j) * nx] = dp; cpv[o + long(j) * nx] = cp;
+        }
+        cpx next = C(0);
+        for (int j = ny - 1; j >= 0; --j) { next = rhs[o + long(j) * nx] - cpv[o + long(j) * nx] * next; oy[o + long(j) * nx] = next; }
+    });
+    device_sync();
+}
+
+// the march of one slice n (all modes or k_x lines)
+void Simulation::march_slice(int n, double D) {
+    MarchCtx c{Rx.data(), Ry.data(), Ez.data(), Bz.data(), Lx.data(), Ly.data(), bnd.data(), j0x.data(), j0y.data(),
+               jkx.data(), jky.data(), jkz.data(), sRx.data(), sRy.data(), sLx.data(), sLy.data(), srhs.data(), scp.data(),
+               kxd.data(), yf ? kyd.data() : nullptr, iD.data(), iA.data(), hcg.data(), wlo.data(), whi.data(), D, a, b, N,
+               cfg.nx, cfg.ny, long(nk)};
+    if (yf) par_for(nk, [=] HD(long i) { march_point(c, i, n); });
+    else par_for(cfg.nx, [=] HD(long i) { march_line(c, int(i), n); });
+    device_sync();
+}
+
+// E and B of slice n in real space (F plane fl = n - a), from its spectra
+void Simulation::real_fields_slice(int n) {
+    const long nkk = nk, l = n - a;
+    const cpx *rx = Rx.data() + l * nkk, *ry = Ry.data() + l * nkk, *lx = Lx.data() + l * nkk, *ly = Ly.data() + l * nkk;
+    const cpx *ez = Ez.data() + l * nkk, *bz = Bz.data() + l * nkk;
+    cpx* t = sp3.data();
+    par_for(nk, [=] HD(long i) {
+        t[i] = C(rx[i].re - ry[i].im, rx[i].im + ry[i].re);
+        t[nkk + i] = C(lx[i].re - ly[i].im, lx[i].im + ly[i].re);
+        t[2 * nkk + i] = C(ez[i].re - bz[i].im, ez[i].im + bz[i].re);
+    });
+    fft_->run(t, 3, true);
+    float* Fp = F.data() + l * nkk;
+    const long fpl = long(ns + 2) * nkk;
+    par_for(nk, [=] HD(long i) {
+        const double r1 = t[i].re, r2 = t[i].im, l1 = t[nkk + i].re, l2 = t[nkk + i].im;
+        Fp[0 * fpl + i] = float(0.5 * (r1 + l1)); Fp[1 * fpl + i] = float(0.5 * (r2 + l2));
+        Fp[3 * fpl + i] = float(0.5 * (l2 - r2)); Fp[4 * fpl + i] = float(0.5 * (r1 - l1));
+        Fp[2 * fpl + i] = float(t[2 * nkk + i].re); Fp[5 * fpl + i] = float(t[2 * nkk + i].im);
+    });
+    device_sync();
+}
+
+// the march of a step with streaming plasma (single rank: a = 0, b = N; half-cell m at plane m + 1).
+// Prediction of the streaming current of half-cell n-1 (needed by R at slice n before the particles get there):
+// its value of level s0 plus the change from s0 to s1, extrapolated linearly from the half-cells n and n+1
+// (numerics.predictor = extrapolate, default) or without the change (previous, as in GEM-PIC-RZ). The change of
+// a laser-driven current is the rotation of the carrier phase in s; without it the error of R at slice n is
+// about (omega_p^2 dz / 2 omega)^2 of the laser field.
+void Simulation::march_plasma(double s0, double s1) {
+    const double Delta = s1 - s0, D = 0.5 * Delta;
+    const long nkk = nk;
+    load_plasma(s0, s1, joining_);
+    joining_.clear();
+    const bool extrap = cfg.predictor_extrapolate;
+    std::vector<double> cen(N - 1);
+    for (int m = 0; m < N - 1; ++m) cen[m] = 0.5 * (cfg.zeta[m] + cfg.zeta[m + 1]);
+    auto copy3 = [&](cpx* dst, const cpx* x, const cpx* y, const cpx* z) {
+        par_for(nk, [=] HD(long i) { dst[i] = x[i]; dst[nkk + i] = y[i]; dst[2 * nkk + i] = z[i]; });
+    };
+    // set the streaming part of jk(m) from `old` (the part it holds now) to `nw`; old <- nw
+    auto replace = [&](int m, cpx* old, const cpx* nw) {
+        cpx* jx = jkx.data() + (m + 1) * nkk; cpx* jy = jky.data() + (m + 1) * nkk; cpx* jz = jkz.data() + (m + 1) * nkk;
+        par_for(nk, [=] HD(long i) {
+            jx[i] = jx[i] + nw[i] - old[i]; jy[i] = jy[i] + nw[nkk + i] - old[nkk + i]; jz[i] = jz[i] + nw[2 * nkk + i] - old[2 * nkk + i];
+            old[i] = nw[i]; old[nkk + i] = nw[nkk + i]; old[2 * nkk + i] = nw[2 * nkk + i];
+        });
+    };
+    cpx* pin = jpred.data();         // streaming part now inside jk(n-1)
+    cpx* tmp = jtmp.data();
+    cpx* dl = dlt.data();            // change s0 -> s1 of half-cell n+1 (extrapolation)
+    // front: half-cell N-2 predicted with its value of level s0
+    jpred.zero();
+    copy3(tmp, js0x.data() + (N - 1) * nkk, js0y.data() + (N - 1) * nkk, js0z.data() + (N - 1) * nkk);
+    replace(N - 2, pin, tmp);
+    march_slice(N - 1, D);
+    real_fields_slice(N - 1);
+
+    StreamCtx sc;
+    {
+        PushCtx& c = sc.pc;
+        c.F = F.data(); c.a = a; c.ns = ns; c.N = N; c.nx = cfg.nx; c.ny = cfg.ny; c.nk = nk; c.self = 1;
+        c.yf = yf; c.dx = dx; c.dy = dy; c.Lx = cfg.Lx; c.Ly = cfg.Ly; c.zax = zax; c.yax = yax; c.laser = laser; c.X0 = X0;
+        c.zc = cfg.zeta_center; c.dz_push = cfg.dz_push; c.push_phase = cfg.push_phase; c.zhand = -1e300;
+        c.zmax = cfg.zeta[N - 1]; c.s1 = s1; c.vz_min = 0;
+        c.ylo = yf ? -1e300 : cfg.ynode[1]; c.yhi = yf ? 1e300 : cfg.ynode[cfg.ny - 1];
+    }
+    sc.zs = zs.data(); sc.J = jsr.data(); sc.ia = iA.data(); sc.id = iD.data();
+    sc.Delta = Delta; sc.s1 = s1; sc.sTrap = s1 + (cfg.trap_advance - 1) * Delta; sc.vz_beam = cfg.vz_beam;
+    const int passes = cfg.iterations;
+    bool have_dl = false;
+    for (int n = N - 2; n >= 0; --n) {
+        const long hp = (n + 1) * nkk;           // plane of half-cell n
+        cpx* sin_ = jsin.data();                  // streaming part inside jk(n): the prediction so far
+        par_for(3 * nkk, [=] HD(long i) { sin_[i] = pin[i]; });
+        cpx* si0 = jsi0.data();                   // ... as used by the solve of slice n+1 (for the correction)
+        par_for(3 * nkk, [=] HD(long i) { si0[i] = pin[i]; });
+        if (n >= 1) {                             // start of the prediction of half-cell n-1: its level s0
+            jpred.zero();
+            copy3(tmp, js0x.data() + n * nkk, js0y.data() + n * nkk, js0z.data() + n * nkk);
+            replace(n - 1, pin, tmp);
+        }
+        if (passes > 1) {
+            int k = 0;
+            for (Buf<cpx>* p : {&Rx, &Ry, &Ez, &Bz}) {
+                cpx* dst = bk.data() + (k++) * nkk; const cpx* src = p->data() + n * nkk;
+                par_for(nk, [=] HD(long i) { dst[i] = src[i]; });
+            }
+            Particle* d = strm_bk.data(); const Particle* sp_ = strm.data();
+            par_for(nstrm, [=] HD(long i) { d[i] = sp_[i]; });
+        }
+        // weights of the linear extrapolation of the change to half-cell n-1
+        const double wex = (n >= 1 && n + 1 <= N - 2 && have_dl) ? (cen[n] - cen[n - 1]) / (cen[n + 1] - cen[n]) : 0.0;
+        for (int pass = 0; pass < passes; ++pass) {
+            if (pass > 0) {
+                int k = 0;
+                for (Buf<cpx>* p : {&Rx, &Ry, &Ez, &Bz}) {
+                    cpx* dst = p->data() + n * nkk; const cpx* src = bk.data() + (k++) * nkk;
+                    par_for(nk, [=] HD(long i) { dst[i] = src[i]; });
+                }
+                Particle* d = strm.data(); const Particle* sp_ = strm_bk.data();
+                par_for(nstrm, [=] HD(long i) { d[i] = sp_[i]; });
+            }
+            jsr.zero();
+            sc.n = n;
+            Particle* P = strm.data();
+            const StreamCtx scc = sc;
+            par_for(nstrm, [=] HD(long i) { stream_one(scc, P[i]); });
+            device_sync();
+            stream_spectra();
+            replace(n, sin_, jsn.data());
+            if (n >= 1 && extrap) {               // prediction of half-cell n-1 = s0 + change, extrapolated
+                const cpx *u = jsn.data(), *sx = js0x.data() + hp, *sy = js0y.data() + hp, *sz = js0z.data() + hp;
+                const cpx *px_ = js0x.data() + n * nkk, *py_ = js0y.data() + n * nkk, *pz_ = js0z.data() + n * nkk;
+                const double w = wex;
+                par_for(nk, [=] HD(long i) {
+                    const cpx d0 = u[i] - sx[i], d1 = u[nkk + i] - sy[i], d2 = u[2 * nkk + i] - sz[i];
+                    tmp[i] = px_[i] + d0 + w * (d0 - dl[i]);
+                    tmp[nkk + i] = py_[i] + d1 + w * (d1 - dl[nkk + i]);
+                    tmp[2 * nkk + i] = pz_[i] + d2 + w * (d2 - dl[2 * nkk + i]);
+                });
+                replace(n - 1, pin, tmp);
+            }
+            march_slice(n, D);
+            real_fields_slice(n);
+        }
+        {   // electron density of half-cell n on the lines y = 0 and x = 0 (frames)
+            const int nx = cfg.nx, ny = cfg.ny;
+            const int i0 = ((int(std::lround(-X0 / dx)) % nx) + nx) % nx;
+            const int j0 = yf ? ((int(std::lround(-Y0 / dy)) % ny) + ny) % ny : ny / 2;
+            const double* J = jsr.data() + 3 * nkk; double* rl = rho_lines.data() + long(n) * (nx + ny);
+            par_for(nx + ny, [=] HD(long k) { rl[k] = k < nx ? J[long(j0) * nx + k] : J[(k - nx) * nx + i0]; });
+        }
+        {   // half-cell n is final: correct R at slice n+1 for the prediction it used, keep the change for the
+            // extrapolation and the current as the prediction of the next step
+            const double q = D * cfg_wlo_[n + 1];
+            cpx* rx = Rx.data() + (n + 1) * nkk; cpx* ry = Ry.data() + (n + 1) * nkk;
+            cpx *sx = js0x.data() + hp, *sy = js0y.data() + hp, *sz = js0z.data() + hp;
+            const cpx* u = jsn.data();
+            par_for(nk, [=] HD(long i) {
+                rx[i] = rx[i] - q * (u[i] - si0[i]); ry[i] = ry[i] - q * (u[nkk + i] - si0[nkk + i]);
+                dl[i] = u[i] - sx[i]; dl[nkk + i] = u[nkk + i] - sy[i]; dl[2 * nkk + i] = u[2 * nkk + i] - sz[i];
+                sx[i] = u[i]; sy[i] = u[nkk + i]; sz[i] = u[2 * nkk + i];
+            });
+            device_sync();
+            have_dl = true;
+        }
+    }
+    // trapped particles: fast ones join the beam list, slow ones stream again in the next step
+    std::vector<Particle> sv(static_cast<size_t>(nstrm));
+    strm.to_host(sv.data(), 0, sv.size());
+    std::vector<Particle> add;
+    for (auto& p : sv) {
+        if (p.alive != 5) continue;
+        const double g = std::sqrt(1 + p.px * p.px + p.py * p.py + p.pz * p.pz);
+        p.z = s1;
+        if (p.pz / g >= cfg.vz_beam) { p.alive = 1; p.sp = SP_TRAPPED; add.push_back(p); ++trapped_total; }
+        else { p.alive = 6; joining_.push_back(p); }
+    }
+    if (!add.empty()) {
+        std::vector<Particle> all = host_particles(), keep;
+        keep.reserve(all.size() + add.size());
+        for (auto& p : all) if (p.alive == 1) keep.push_back(p);
+        keep.insert(keep.end(), add.begin(), add.end());
+        set_particles(keep);
+    }
+    // the sponge damps R - R_b with the bound field of the beam list only (the plasma is not a v = c source)
+    cpx* jz = jkz.data(); const cpx* sz = js0z.data();
+    par_for(long(ns + 1) * nk, [=] HD(long i) { jz[i] = jz[i] - sz[i]; });
+    device_sync();
+}
+
+// the beam particles that became slower than vz_min stream in the current march
+void Simulation::collect_restreaming() {
+    std::vector<Particle> all = host_particles(), keep;
+    bool any = false;
+    for (auto& p : all) if (p.alive == 4) { any = true; break; }
+    if (!any) return;
+    for (auto& p : all) {
+        if (p.alive == 4) { Particle q = p; q.alive = 6; joining_.push_back(q); ++restreamed_total; }
+        else if (p.alive == 1) keep.push_back(p);
+    }
+    set_particles(keep);
+}
+
+// a Gaussian laser pulse on the grid: R = 2 E_perp of a paraxial beam (complex beam parameter), focus at z_focus
+void Simulation::add_grid_lasers() {
+    if (cfg.glasers.empty()) return;
+    const int nx = cfg.nx, ny = cfg.ny;
+    const size_t pl = size_t(nk);
+    std::vector<cpx> pk(pl);
+    for (const auto& Lz : cfg.glasers) {
+        const double amp = Lz.a0 * Lz.kL;                       // field in m c omega0 / e
+        const double zR = 0.5 * Lz.kL * Lz.waist * Lz.waist;
+        const std::complex<double> qb(1.0, (0.0 - Lz.z_focus) / zR);
+        const std::complex<double> rot(std::cos(Lz.pol_angle), std::sin(Lz.pol_angle));
+        for (int n = a; n < b; ++n) {
+            const double d = cfg.zeta[n] - Lz.zeta_c;
+            const double env = std::exp(-2 * std::log(2.0) * d * d / (Lz.tau * Lz.tau));
+            if (env < 1e-12) continue;
+            const std::complex<double> car = std::exp(std::complex<double>(0, Lz.kL * d + Lz.cep));
+            auto field = [&](double xp, double yp, double& ex, double& ey) {
+                const std::complex<double> E = amp * env * std::exp(-(xp * xp + yp * yp) / (Lz.waist * Lz.waist) / qb) / qb * car;
+                if (Lz.circular) { ex = E.real(); ey = Lz.helicity * E.imag(); }
+                else { ex = E.real() * rot.real(); ey = E.real() * rot.imag(); }
+            };
+            for (int j = 0; j < ny; ++j)
+                for (int i = 0; i < nx; ++i) {
+                    const double xp = i * dx + X0;
+                    double ex, ey, ex2, ey2;
+                    if (yf) {
+                        field(xp, j * dy + Y0, ex, ey);
+                        pk[size_t(j) * nx + i] = C(2 * ex, 2 * ey);                         // R_x + i R_y
+                    } else {                                                           // R_x on nodes, R_y on half-nodes
+                        field(xp, cfg.ynode[j], ex, ey);
+                        field(xp, 0.5 * (cfg.ynode[j] + cfg.ynode[j + 1]), ex2, ey2);
+                        pk[size_t(j) * nx + i] = C(j == 0 ? 0.0 : 2 * ex, 2 * ey2);
+                    }
+                }
+            sp3.from_host(pk.data(), 0, pl);
+            cpx* t = sp3.data();
+            fft_->run(t, 1, false);
+            const long l = n - a, nkk = nk;
+            cpx* rx = Rx.data() + l * nkk; cpx* ry = Ry.data() + l * nkk;
+            const bool yfo = yf;
+            par_for(nk, [=] HD(long idx) {
+                const int ixx = int(idx % nx), j = int(idx / nx);
+                const long m = yfo ? long((ny - j) % ny) * nx + (nx - ixx) % nx : idx - ixx + (nx - ixx) % nx;
+                const cpx z = t[idx], zm = conj(t[m]);
+                rx[idx] = rx[idx] + 0.5 * (z + zm); ry[idx] = ry[idx] + 0.5 * C((z - zm).im, -(z - zm).re);
+            });
+            device_sync();
+        }
+    }
+}
+
+// Frame for the GUI: E and B (and with plasma n_e/n0 of the streaming particles) in the planes y = 0 and x = 0
+// through the axis. One header line (JSON), then float32 arrays: per component the plane y = 0 [nzeta][nx],
+// then the plane x = 0 [nzeta][ny]. Free-hand y: components on half-nodes are averaged to y = 0 in the plane
+// y = 0 and given at the half-nodes in the plane x = 0 (y_half in the header).
+void Simulation::write_frame(const std::string& file) {
+    const int nx = cfg.nx, ny = cfg.ny, ncomp = 6;
+    const int i0 = ((int(std::lround(-X0 / dx)) % nx) + nx) % nx;
+    const int j0 = yf ? ((int(std::lround(-Y0 / dy)) % ny) + ny) % ny : ny / 2;
+    const std::vector<float> Fh = cfg.self_fields ? F.host() : std::vector<float>(F.size(), 0.0f);
+    std::vector<float> mine(size_t(ns) * ncomp * (nx + ny));
+    const long fpl = long(ns + 2) * nk;
+    for (int l = 0; l < ns; ++l)
+        for (int c = 0; c < ncomp; ++c) {
+            const float* P = Fh.data() + c * fpl + long(l) * nk;
+            float* o = &mine[(size_t(l) * ncomp + c) * (nx + ny)];
+            const bool half = !yf && is_half(c);
+            for (int i = 0; i < nx; ++i) o[i] = half ? 0.5f * (P[long(j0 - 1) * nx + i] + P[long(j0) * nx + i]) : P[long(j0) * nx + i];
+            for (int j = 0; j < ny; ++j) o[nx + j] = P[long(j) * nx + i0];
+        }
+    std::vector<char> all = comm.gather_bytes(mine.data(), mine.size() * sizeof(float));
+    if (comm.rank != 0) return;
+    const float* A = reinterpret_cast<const float*>(all.data());
+    const double um = cfg.Lu * 1e6;
+    std::string h = "{\"step\": " + std::to_string(istep) + ", \"z_mm\": " + std::to_string(s * cfg.Lu * 1e3) +
+                    ", \"nzeta\": " + std::to_string(N) + ", \"nx\": " + std::to_string(nx) + ", \"ny\": " + std::to_string(ny);
+    auto arr = [&](const std::vector<double>& v) {
+        std::string t = "[";
+        char b[32];
+        for (size_t k = 0; k < v.size(); ++k) { std::snprintf(b, sizeof b, "%s%.6g", k ? ", " : "", v[k]); t += b; }
+        return t + "]";
+    };
+    std::vector<double> zeta(N), xs(nx), yn(ny), yh(ny);
+    for (int n = 0; n < N; ++n) zeta[n] = cfg.zeta[n] * um;
+    for (int i = 0; i < nx; ++i) xs[i] = (((i - i0) % nx + nx + nx / 2) % nx - nx / 2) * dx * um;   // relative to the axis
+    for (int j = 0; j < ny; ++j) {
+        yn[j] = yf ? (((j - j0) % ny + ny + ny / 2) % ny - ny / 2) * dy * um : cfg.ynode[j] * um;
+        yh[j] = yf ? yn[j] : 0.5 * (cfg.ynode[j] + cfg.ynode[j + 1]) * um;
+    }
+    const bool dens = cfg.plasma_on;
+    h += ", \"zeta_um\": " + arr(zeta) + ", \"x_um\": " + arr(xs) + ", \"y_um\": " + arr(yn) + ", \"y_half_um\": " + arr(yh) +
+         ", \"comps\": [\"ex\", \"ey\", \"ez\", \"bx\", \"by\", \"bz\"" + (dens ? ", \"ne\"" : "") + "]" +
+         ", \"half\": [false, " + (yf ? "false" : "true") + ", false, " + (yf ? "false" : "true") + ", false, " + (yf ? "false" : "true") +
+         (dens ? ", false" : "") + "], \"n0\": " + std::to_string(cfg.n0) + ", \"lambda0_um\": " + std::to_string(cfg.lambda0 * 1e6) + "}\n";
+    const std::string tmp = file + ".tmp";
+    FILE* f = std::fopen(tmp.c_str(), "wb");
+    if (!f) throw std::runtime_error("cannot write " + tmp);
+    std::fwrite(h.data(), 1, h.size(), f);
+    std::vector<float> buf(size_t(N) * std::max(nx, ny));
+    for (int c = 0; c < ncomp; ++c) {
+        for (int n = 0; n < N; ++n) for (int i = 0; i < nx; ++i) buf[size_t(n) * nx + i] = A[(size_t(n) * ncomp + c) * (nx + ny) + i];
+        std::fwrite(buf.data(), sizeof(float), size_t(N) * nx, f);
+        for (int n = 0; n < N; ++n) for (int j = 0; j < ny; ++j) buf[size_t(n) * ny + j] = A[(size_t(n) * ncomp + c) * (nx + ny) + nx + j];
+        std::fwrite(buf.data(), sizeof(float), size_t(N) * ny, f);
+    }
+    if (dens) {                                          // n_e / n0 at the slices: mean of the adjacent half-cells
+        const std::vector<double> rl = rho_lines.host();
+        const int L = nx + ny;
+        auto at = [&](int n, int k) {
+            const double lo = n > 0 ? rl[size_t(n - 1) * L + k] : 0, hi = n < N - 1 ? rl[size_t(n) * L + k] : 0;
+            return float(-0.5 * (lo + hi) / cfg.n0);
+        };
+        for (int n = 0; n < N; ++n) for (int i = 0; i < nx; ++i) buf[size_t(n) * nx + i] = at(n, i);
+        std::fwrite(buf.data(), sizeof(float), size_t(N) * nx, f);
+        for (int n = 0; n < N; ++n) for (int j = 0; j < ny; ++j) buf[size_t(n) * ny + j] = at(n, nx + j);
+        std::fwrite(buf.data(), sizeof(float), size_t(N) * ny, f);
+    }
+    std::fclose(f);
+    std::rename(tmp.c_str(), file.c_str());
 }

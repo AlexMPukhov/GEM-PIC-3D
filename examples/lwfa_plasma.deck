@@ -1,0 +1,48 @@
+# Laser wakefield in a uniform plasma (3D, Fourier transverse): a0 = 2 Gaussian pulse on the grid.
+#   laser: lambda = 0.8 um, w0 = 12 um, 25 fs FWHM (intensity), focus at z = 0.5 mm
+#   plasma: 3.5e18 cm^-3 after a 100 um up-ramp, plasma electrons streaming through the window
+# Run with frames for the GUI:  build/gempic3d examples/lwfa_plasma.deck output.frames=true
+
+grid {
+  lambda0       = 0.8 um
+  nx            = 64
+  ny            = 64
+  Lx            = 80 um
+  Ly            = 80 um
+  sponge        = 8 um
+  nzeta         = 1201          # dzeta = 0.05 um: 16 points per wavelength
+  window_length = 60 um
+  dz            = 4 um          # field step along z (no Courant limit)
+  z_end         = 1 mm
+  move_x        = false
+  move_y        = false
+}
+
+laser {
+  type          = gaussian
+  a0            = 2
+  waist         = 12 um
+  tau_fwhm      = 25 fs
+  zeta_center   = 48 um
+  z_focus       = 0.5 mm
+  polarization  = linear
+}
+
+plasma {
+  density       = 3.5e18 cm^-3
+  z_points      = 0, 100 um
+  z_values      = 0, 1
+  ppc_x         = 2
+  ppc_y         = 2
+  r_max         = 30 um
+  smooth_length = 0.25 um       # bubble closure (as plasma.smooth_length in GEM-PIC-RZ)
+}
+
+numerics {
+  iterations = 2
+}
+
+output {
+  dir   = lwfa
+  every = 25
+}

@@ -8,6 +8,10 @@ so the field solve of a slice is a closed-form scalar problem per (k_x, k_y). Op
 finite-difference grid between conducting walls (fine near the bunch, coarse far out); the solve is then
 one tridiagonal system along y per k_x. The ζ grid is uniform or free-hand in either case.
 
+Plasma (stage 1 of the GEM-PIC-RZ physics): streaming plasma electrons with an immobile ion background,
+lasers on the grid, trapping into the beam list and the bubble closure `plasma.smooth_length`; see
+"Plasma". A browser GUI (`tools/gempic3d_gui.py`) edits and runs decks and shows the fields live.
+
 The first application is a dense electron bunch overtaken at a small angle by a plane-wave laser,
 with the radiation of the bunch resolved on the grid and acting back on it
 (`examples/oblique_plane_wave.deck`).
@@ -25,6 +29,7 @@ build/gempic3d examples/oblique_plane_wave.deck --check            # summary and
 build/gempic3d examples/oblique_plane_wave.deck                    # run, results in oblique/
 build/gempic3d examples/oblique_plane_wave.deck laser.enabled=false output.dir=ref   # reference
 tools/compare.py oblique ref                                       # <pz> with and without the laser
+python3 tools/gempic3d_gui.py examples/lwfa_plasma.deck            # GUI in the browser
 ```
 
 Any key can be overridden on the command line as `block.key=value`. Unknown keys, missing units and
@@ -131,6 +136,66 @@ millimetre this way. The transverse window follows the bunch centroid in whole c
 Fourier y); the shift is an exact phase factor in Fourier space. Particle coordinates stay continuous, since the analytic laser
 is not periodic in the box; only grid indices wrap.
 
+## Plasma
+
+Stage 1 of the physics of GEM-PIC-RZ, with the same algorithm (`src/sim.cpp`, section "plasma"):
+
+- **Plasma block:** `density` (cm^-3 or n_c), a longitudinal profile (`z_points`, `z_values`, linear between
+  the points, constant beyond them), uniform or `parabolic` channel (`channel_depth` at `r_channel`), column
+  radius `r_max`, `ppc_x` × `ppc_y` electrons per cell on a regular lattice. The ions are an immobile background.
+- **Streaming electrons:** fresh plasma is loaded at the front of the window in every step and streams to the
+  rear. Per half-cell n, in `numerics.iterations` passes (default 2; 1 is unstable): the electrons are pushed
+  from ζ_{n+1} to ζ_n by Boris with dt = h/(1 − v_z) in the fields of slice n+1 (final) and slice n, their
+  current W = q w dt/Δ is deposited (TSC), smoothed, transformed, and slice n is solved. The analytic plane
+  wave acts on them too. The march goes slice by slice when there is plasma.
+- **Prediction of R:** R at slice n needs the current of half-cell n − 1 before the electrons get there. GEM-PIC-RZ
+  predicts it with its value of the previous level (`numerics.predictor = previous`). In a laser pulse that
+  current rotates with the carrier phase from level to level, and the prediction error of R is then about
+  (ω_p² Δ / 2ω)² of the laser field: 6 % in the wake amplitude at n0 = 0.01 n_c and Δ = 50 k0⁻¹, and the scheme
+  grows without bound at Δ = 200 k0⁻¹. The default `extrapolate` adds the change from the previous level,
+  extrapolated linearly in ζ from the half-cells n and n+1: 0.6 % at Δ = 50, stable at Δ = 200 (with damping).
+  R at slice n+1 is corrected once half-cell n is final, as in GEM-PIC-RZ.
+- **Trapping:** an electron that reaches z = s1 + (`trap_advance` − 1) Δ inside the march joins the beam list if
+  v_z ≥ `vz_beam` (its beam current is deposited at once), and streams again from its ζ in the next step
+  otherwise. Beam-list particles slower than `vz_min` leave it and stream in the current march from their
+  (z, ζ). `diag.txt` keeps the moments of the bunch only and adds the number and charge of trapped electrons.
+- **Bubble closure** (`plasma.smooth_length`, as in GEM-PIC-RZ): the streaming current of every half-cell is
+  smoothed, j ← (1 − a²∇⊥²)⁻¹ j: a factor 1/(1 + a²k⊥²) for Fourier y; on the free-hand y one tridiagonal solve
+  per k_x for the node components (j_x, j_z, E_z-like) and for the half-node component (j_y, B_z-like). Both
+  commute with the discrete divergence, so the smoothed current conserves the smoothed charge.
+- **Lasers on the grid** (`laser` blocks with `type = gaussian`; more blocks: `laser`, `laser2`, …): paraxial
+  Gaussian pulses, R = 2E⊥ with the complex beam parameter (focus at `z_focus`), `a0`, `waist`, `tau_fwhm`
+  (intensity), `zeta_center`, `cep`, linear (`pol_angle`) or circular (`helicity`) polarization. The analytic
+  plane wave (`type = plane_wave`, the default) stays as before; it is not changed by the plasma.
+- **Net current:** with plasma the k⊥ = 0 current is kept (a 1D plasma wave, not a net current in a periodic box),
+  and the sponge uses the bound field of the beam list only.
+- **Not yet:** MPI (plasma runs on one rank), mobile ions, field ionization, several bunches, external fields
+  and undulators, profiles as expressions, HDF5/openPMD output and checkpoints (the next stages).
+
+## GUI
+
+`tools/gempic3d_gui.py` is the browser front end of GEM-PIC-RZ adapted to 3D: a small local web server
+(Python standard library and numpy) and a page without external dependencies.
+
+```
+python3 tools/gempic3d_gui.py examples/lwfa_plasma.deck          # opens the browser
+python3 tools/gempic3d_gui.py my.deck --no-browser --port 8767   # remote: ssh -L 8767:127.0.0.1:8767 host
+```
+
+- **Deck:** editor with the example decks, Save, Check (`gempic3d deck --check`), extra command-line
+  overrides that are not saved in the deck.
+- **Run:** threads (OpenMP), MPI ranks, Stop, the log and the progress. A deck with errors is refused with the
+  message.
+- **Live frames:** the GUI runs with `output.frames = true` on the command line (and `output.every` if "frames
+  every" is given); every output step then writes `frame_NNNNN.bin` (written as `.tmp` and renamed): E, B and,
+  with plasma, n_e/n0 of the streaming electrons in the planes y = 0 and x = 0 through the axis, assembled from
+  all MPI ranks.
+- **Plots:** 2D map of either plane with a robust colour range, cuts along ζ and across (click the map), frame
+  slider and playback, and the bunch moments from `diag.txt` against z.
+- **Security:** the server listens on 127.0.0.1 only, and every request needs the random token of its URL.
+- **Test:** `sh tests/gui.sh build-mpi/gempic3d` runs decks through the HTTP API: frames and cuts against the
+  frame files, a 2-rank run against 1 rank (to rounding), a plasma run with n_e/n0, token and deck errors.
+
 ## Parallelism
 
 **CPU and GPU from one source.** `src/portable.hpp` writes every kernel once as a lambda that runs as an OpenMP
@@ -206,7 +271,15 @@ real GPU is still to be done.
 | numerics | `self_fields` | true | false: test particles in the laser only |
 | | `zeta_filter`, `k_filter` | true, true | current filters |
 | | `push_phase` | 0.05 rad | laser phase per RK4 sub-step |
-| output | `dir`, `every`, `particles` | out, 10, true | |
+| | `type` | plane_wave | `plane_wave` (analytic, above) or `gaussian` (on the grid): `a0`, `wavelength`, `waist`, `tau_fwhm`, `zeta_center`, `z_focus` (0), `cep`, `polarization` (linear, circular), `pol_angle`, `helicity`, `enabled` |
+| plasma | `density` | — | cm^-3 or n_c |
+| | `z_points`, `z_values` | — | longitudinal profile (relative), linear between the points |
+| | `profile`, `channel_depth`, `r_channel` | uniform | `parabolic`: n0 (1 + depth r²/r_channel²) |
+| | `r_max`, `ppc_x`, `ppc_y` | ∞, 2, ppc_x | column radius, electrons per cell |
+| | `smooth_length` | 0 | bubble closure: smoothing length of the plasma currents |
+| numerics | `iterations`, `predictor` | 2, extrapolate | passes per slice; prediction of the streaming current (`previous`: as GEM-PIC-RZ) |
+| | `vz_min`, `vz_beam`, `trap_advance` | 0.8, 0.9, 1 | trapping and return to streaming, as in GEM-PIC-RZ |
+| output | `dir`, `every`, `particles`, `frames` | out, 10, true, false | `frames`: frame_NNNNN.bin for the GUI |
 
 `diag.txt` has one line per output step: z, the centroid (x, y, ζ), the rms sizes, ⟨p_x⟩, ⟨p_y⟩,
 ⟨p_z⟩, ⟨γ⟩, ⟨p·k̂⟩ (along the laser), the rms of p_z, the position of the bunch in the pulse
@@ -227,6 +300,11 @@ and `particles_end.txt` hold the macroparticles.
 | dense γ = 50, 160 pC bunch with and without the sponge; Fourier y, free-hand y | 2e-7; 6e-7 |
 | constant-step ζ table against the uniform ζ grid, with Fourier y and with the free-hand y | bit for bit |
 | MPI, 2/3/4 ranks against 1 rank (`tests/mpi.sh`), Fourier y and free-hand y | identical |
+| plasma, 1D linear wake of a Gaussian laser pulse (a0 = 0.05, n0 = 0.01 n_c) against cold-fluid theory: amplitude, plasma wavelength; predictor extrapolate / previous | 0.8 %, 3e-5; 2.5 %, 3e-5 |
+| plasma, 3D linear wake of a narrow bunch on the axis against linear theory (K0 Green's function), Fourier y and free-hand y | **open: 21 % rms after 3 steps, ~9 % after 25** (amplitude to a few %, phase shifted by ~0.1 rad; under investigation) |
+| plasma, smoothing commutes with the divergence (free-hand y) | 4e-16 |
+| streaming in vacuum: a fast electron is trapped at ζ0 − (1 − v_z) Δ/v_z and moves on in the beam list; a slow one returns to streaming | 1e-9 |
+| GUI (`tests/gui.sh`): frames, cuts, 2 ranks = 1 rank, plasma frames | pass |
 | all of the above in the GPU emulator (`make EMU=1 test`, `tests/mpi.sh build-emu-mpi/gempic3d`); FFTW build | pass; pass |
 
 With the default grids (Fourier y, uniform ζ) the code reproduces the previous version (commit cf3ee50)
@@ -238,6 +316,13 @@ and at 0.05 the momentum after the pulse is off by 5e-5. The pulse must start an
 At 2.5 FWHM the residual A ~ 10⁻³ a0, amplified by the cross term 2p⊥0·A/h, leaves 4e-4 in p_z.
 
 ## Limits and next steps
+
+- **Plasma, open check:** the 3D linear wake of a narrow bunch differs from linear theory by about 9 % rms
+  (a phase shift of ~0.1 rad behind the bunch), also with a density up-ramp. Whether this is a start-up
+  transient of the forward field R or an error of the transverse plasma response is not yet known; the check
+  is reported as OPEN by `make test`. Use the plasma model for exploration only until this is resolved.
+- **Plasma, performance:** the march goes slice by slice with plasma (FFTs of single planes); the LWFA example
+  takes about 25 s per step on one core.
 
 - **Backward radiation is not described** (∂_s L dropped). A momentum gain from the recoil of backward
   or large-angle emission is outside the model by construction.

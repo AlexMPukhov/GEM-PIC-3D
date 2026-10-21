@@ -1,0 +1,456 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GEM-PIC-3D</title>
+<style>
+:root {
+  --bg: #f4f5f2; --panel: #ffffff; --ink: #1f3a5f; --sub: #566e8e; --line: #d6dce4;
+  --accent: #0e8fb8; --warn: #9b1c1c; --ok: #2e7d4f; --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; background: var(--bg); color: var(--ink);
+  font: 14px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+header { display: flex; align-items: center; gap: 14px; padding: 8px 14px; background: var(--ink); color: #eef1f4; }
+header img { width: 26px; height: 26px; }
+header .name { font-weight: 700; letter-spacing: .06em; font-size: 17px; }
+header .deck { font-family: var(--mono); font-size: 12px; opacity: .8; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
+.pill { padding: 2px 10px; border-radius: 10px; font-size: 12px; background: #2c4a70; white-space: nowrap; }
+.pill.run { background: var(--accent); } .pill.err { background: var(--warn); } .pill.done { background: var(--ok); }
+main { display: grid; grid-template-columns: minmax(330px, 34%) 1fr; gap: 10px; padding: 10px; height: calc(100% - 44px); }
+.col { display: flex; flex-direction: column; gap: 10px; min-height: 0; min-width: 0; }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; min-width: 0; }
+.card h3 { margin: 0 0 6px; font-size: 12px; text-transform: uppercase; letter-spacing: .08em; color: var(--sub); display: flex; gap: 8px; align-items: center; }
+.card h3 .sp { flex: 1; }
+.card h3 .hint, .card h3 label { text-transform: none; letter-spacing: 0; }   /* µm, ζ, field names */
+.row { display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: center; margin: 4px 0; }
+label { font-size: 12px; color: var(--sub); display: inline-flex; gap: 4px; align-items: center; }
+input, select, button, textarea { font: inherit; color: var(--ink); }
+input[type=number] { width: 64px; } input[type=text] { min-width: 0; }
+input, select { border: 1px solid var(--line); border-radius: 5px; padding: 2px 5px; background: #fff; }
+button { border: 1px solid var(--line); background: #fff; border-radius: 5px; padding: 3px 10px; cursor: pointer; }
+button:hover { border-color: var(--accent); }
+button.primary { background: var(--accent); color: #fff; border-color: var(--accent); font-weight: 600; }
+button.stop { background: var(--warn); color: #fff; border-color: var(--warn); }
+button:disabled { opacity: .45; cursor: default; }
+#editor { flex: 1; min-height: 160px; width: 100%; resize: none; font: 12.5px/1.45 var(--mono);
+  border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; tab-size: 4; white-space: pre; }
+#log { height: 150px; overflow: auto; font: 11.5px/1.35 var(--mono); background: #0b0f18; color: #cfd6df;
+  border-radius: 6px; padding: 6px 8px; white-space: pre; margin: 0; }
+.editcard { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+canvas { width: 100%; display: block; }
+#map { height: 300px; cursor: crosshair; } #lines { height: 210px; } #rline { height: 210px; } #beams { height: 200px; }
+.two { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.chk { display: inline-flex; gap: 3px; align-items: center; font-size: 12px; margin-right: 6px; }
+.hint { font-size: 12px; color: var(--sub); }
+#bar { height: 4px; background: var(--line); border-radius: 2px; overflow: hidden; margin-top: 4px; }
+#bar > div { height: 100%; width: 0; background: var(--accent); transition: width .3s; }
+details summary { cursor: pointer; font-size: 12px; color: var(--sub); }
+.plotcol { overflow: auto; }
+</style>
+</head>
+<body>
+<header>
+  <span class="name">GEM-PIC-3D</span>
+  <span class="deck" id="hdeck"></span>
+  <span class="pill" id="pill">idle</span>
+</header>
+<main>
+  <section class="col">
+    <div class="card editcard">
+      <h3>Input deck <span class="sp"></span>
+        <select id="examples" title="open an example deck"><option value="">examples…</option></select></h3>
+      <div class="row">
+        <input type="text" id="path" style="flex:1" title="deck file (saved before every run)">
+        <button id="bload" title="read the file">Open</button>
+        <button id="bsave" title="write the editor to the file">Save</button>
+      </div>
+      <textarea id="editor" spellcheck="false"></textarea>
+      <details>
+        <summary>extra command-line overrides (one key = value per line, not saved in the deck)</summary>
+        <textarea id="extra" rows="3" style="width:100%;font:12px var(--mono)"></textarea>
+      </details>
+    </div>
+    <div class="card">
+      <h3>Run</h3>
+      <div class="row">
+        <label>threads <input type="number" id="threads" min="1" value="2"></label>
+        <label>MPI ranks <input type="number" id="ranks" min="1" value="1"></label>
+        <button class="primary" id="brun">▶ Run</button>
+        <button class="stop" id="bstop" disabled>■ Stop</button>
+        <button id="bcheck" title="check the deck (gempic3d deck --check)">Check</button>
+        <button id="bbrowse" title="show the output of an earlier run of this deck">Browse output</button>
+      </div>
+      <div class="row">
+        <label title="frames (output files) every N steps: overrides output.every; 0 = as in the deck">frames every <input type="number" id="every" min="0" value="0"></label>
+        <span class="hint" id="h5hint">every output step also writes frame_NNNNN.bin (planes y = 0 and x = 0)</span>
+      </div>
+      <div id="bar"><div></div></div>
+      <pre id="log"></pre>
+    </div>
+  </section>
+  <section class="col plotcol">
+    <div class="card">
+      <h3>2D map <span class="sp"></span><span class="hint" id="mapinfo"></span></h3>
+      <div class="row">
+        <label>field <select id="mcomp"></select></label>
+        <label>plane <select id="plane"><option value="y0">y = 0 (x across)</option><option value="x0">x = 0 (y across)</option></select></label>
+        <label>|<span class="tv">x</span>| max (µm) <input type="number" id="mrmax" min="0" step="any" value="0" title="0 = whole grid"></label>
+        <label class="chk" title="colour scale over 99.5 % of the values (spikes saturate)"><input type="checkbox" id="clip" checked> clip extremes</label>
+        <label class="chk"><input type="checkbox" id="fixscale"> fix colour scale</label>
+        <span class="hint">click: set the cuts</span>
+      </div>
+      <canvas id="map"></canvas>
+      <div class="row">
+        <button id="bplay" title="play the frames">▶</button>
+        <input type="range" id="frame" min="0" max="0" value="0" style="flex:1">
+        <span class="hint" id="frinfo">no frames</span>
+        <label class="chk"><input type="checkbox" id="follow" checked> follow the run</label>
+      </div>
+    </div>
+    <div class="two">
+      <div class="card">
+        <h3>Cut along ζ <span class="sp"></span><span class="hint" id="lineinfo"></span></h3>
+        <div class="row" id="lcomps"></div>
+        <div class="row"><label>at <span class="tv">x</span> (µm) = <input type="number" id="rcut" step="any" value="0"></label></div>
+        <canvas id="lines"></canvas>
+      </div>
+      <div class="card">
+        <h3>Transverse cut <span class="sp"></span><span class="hint" id="rinfo"></span></h3>
+        <div class="row" id="rcomps"></div>
+        <div class="row"><label>at ζ (µm) = <input type="number" id="xicut" step="any" value="0"></label></div>
+        <canvas id="rline"></canvas>
+      </div>
+    </div>
+    <div class="card">
+      <h3>Bunch (diag.txt) <span class="sp"></span>
+        <select id="bsel" style="display:none"><option value="">all</option></select>
+        <label>quantity <select id="bq">
+          <option value="pz">⟨p_z⟩ (m c)</option><option value="gamma">⟨γ⟩</option><option value="rms_pz">rms p_z</option>
+          <option value="p_khat">⟨p·k̂⟩</option><option value="px">⟨p_x⟩</option><option value="py">⟨p_y⟩</option>
+          <option value="x_um">⟨x⟩ (µm)</option><option value="y_um">⟨y⟩ (µm)</option><option value="zeta_um">⟨ζ⟩ (µm)</option>
+          <option value="sig_x_um">σx (µm)</option><option value="sig_y_um">σy (µm)</option><option value="sig_z_um">σζ (µm)</option>
+          <option value="N">N alive</option><option value="a_env">a_env (plane wave)</option><option value="W_field_J">W field (J)</option>
+          <option value="W_kin_J">W kin (J)</option><option value="N_trapped">N trapped</option><option value="Q_trapped_pC">Q trapped (pC)</option></select></label></h3>
+      <canvas id="beams"></canvas>
+    </div>
+  </section>
+</main>
+<script>
+"use strict";
+const TOKEN = new URLSearchParams(location.search).get("token") || "";
+const $ = id => document.getElementById(id);
+const COLORS = ["#0e8fb8", "#9b1c1c", "#2e7d4f", "#d9822b", "#6d4cc2", "#1f3a5f", "#c2185b", "#7a8696"];
+const LABEL = { ex: "E_x", ey: "E_y", ez: "E_z", bx: "B_x", by: "B_y", bz: "B_z", ne: "n_e/n0" };
+const tv = () => ($("plane") && $("plane").value === "x0") ? "y" : "x";   // the transverse coordinate of the plane
+const lab = c => LABEL[c] || c;
+
+async function api(path, params = {}, body = null) {
+  const q = new URLSearchParams(params).toString();
+  const r = await fetch(path + (q ? "?" + q : ""), body === null ? { headers: { "X-Token": TOKEN } } :
+    { method: "POST", headers: { "X-Token": TOKEN, "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  const j = await r.json();
+  if (!r.ok) throw new Error(j.error || r.statusText);
+  return j;
+}
+
+// ------------------------------------------------------------------ plotting helpers
+function niceTicks(a, b, n) {
+  if (!(isFinite(a) && isFinite(b)) || a === b) { const d = Math.abs(a) || 1; a -= d; b += d; }
+  const span = Math.abs(b - a), raw = span / n, p = Math.pow(10, Math.floor(Math.log10(raw)));
+  const step = [1, 2, 2.5, 5, 10].map(m => m * p).find(s => span / s <= n) || 10 * p;
+  const lo = Math.min(a, b), hi = Math.max(a, b), out = [];
+  for (let v = Math.ceil(lo / step) * step; v <= hi + step * 1e-9; v += step) out.push(Math.abs(v) < step * 1e-9 ? 0 : v);
+  return out;
+}
+const fmt = v => { const a = Math.abs(v); return a === 0 ? "0" : (a >= 1e4 || a < 1e-3) ? v.toExponential(1) : (+v.toPrecision(4)).toString(); };
+
+function setupCanvas(cv) {
+  const dpr = window.devicePixelRatio || 1, w = cv.clientWidth, h = cv.clientHeight;
+  if (cv.width !== Math.round(w * dpr) || cv.height !== Math.round(h * dpr)) { cv.width = Math.round(w * dpr); cv.height = Math.round(h * dpr); }
+  const g = cv.getContext("2d"); g.setTransform(dpr, 0, 0, dpr, 0, 0); g.clearRect(0, 0, w, h);
+  g.font = "11px system-ui, sans-serif"; return [g, w, h];
+}
+
+function axes(g, box, xr, yr, opt) {
+  const [x0, y0, w, h] = box;
+  const X = v => opt.rev ? x0 + w - (v - xr[0]) / (xr[1] - xr[0]) * w : x0 + (v - xr[0]) / (xr[1] - xr[0]) * w;
+  const Y = v => y0 + h - (v - yr[0]) / (yr[1] - yr[0]) * h;
+  g.strokeStyle = "#e3e8ee"; g.fillStyle = "#566e8e"; g.lineWidth = 1;
+  g.textAlign = "center"; g.textBaseline = "top";
+  for (const t of niceTicks(xr[0], xr[1], Math.max(3, Math.floor(w / 80)))) {
+    const x = X(t); if (opt.grid) { g.beginPath(); g.moveTo(x, y0); g.lineTo(x, y0 + h); g.stroke(); }
+    g.fillText(fmt(t), x, y0 + h + 4);
+  }
+  g.textAlign = "right"; g.textBaseline = "middle";
+  for (const t of niceTicks(yr[0], yr[1], Math.max(3, Math.floor(h / 40)))) {
+    const y = Y(t); if (opt.grid) { g.beginPath(); g.moveTo(x0, y); g.lineTo(x0 + w, y); g.stroke(); }
+    g.fillText(fmt(t), x0 - 4, y);
+  }
+  g.strokeStyle = "#8a9bb0"; g.strokeRect(x0, y0, w, h);
+  g.fillStyle = "#1f3a5f"; g.textAlign = "center"; g.textBaseline = "bottom";
+  if (opt.xlabel) g.fillText(opt.xlabel, x0 + w / 2, y0 + h + 32);
+  if (opt.ylabel) { g.save(); g.translate(12, y0 + h / 2); g.rotate(-Math.PI / 2); g.textBaseline = "top"; g.fillText(opt.ylabel, 0, -8); g.restore(); }
+  return [X, Y];
+}
+
+function linePlot(cv, x, series, opt = {}) {
+  const [g, W, H] = setupCanvas(cv);
+  const names = Object.keys(series);
+  if (!names.length || !x.length) { g.fillStyle = "#8a9bb0"; g.fillText(opt.empty || "no data", 60, H / 2); return; }
+  let lo = Infinity, hi = -Infinity;
+  for (const n of names) for (const v of series[n]) if (isFinite(v)) { lo = Math.min(lo, v); hi = Math.max(hi, v); }
+  if (lo === hi) { lo -= 1; hi += 1; } const pad = 0.05 * (hi - lo); lo -= pad; hi += pad;
+  const xr = [Math.min(...[x[0], x[x.length - 1]]), Math.max(...[x[0], x[x.length - 1]])];
+  const box = [58, 8, W - 70, H - 46];
+  const [X, Y] = axes(g, box, xr, [lo, hi], { ...opt, grid: true });
+  if (lo < 0 && hi > 0) { g.strokeStyle = "#b8c2ce"; g.beginPath(); g.moveTo(box[0], Y(0)); g.lineTo(box[0] + box[2], Y(0)); g.stroke(); }
+  g.save(); g.beginPath(); g.rect(box[0], box[1], box[2], box[3]); g.clip();
+  names.forEach((n, i) => {
+    const y = series[n]; g.strokeStyle = (opt.colors && opt.colors[n]) || COLORS[i % COLORS.length]; g.lineWidth = 1.4; g.beginPath();
+    let started = false;
+    for (let k = 0; k < x.length; k++) { if (!isFinite(y[k])) { started = false; continue; }
+      const px = X(x[k]), py = Y(y[k]); if (started) g.lineTo(px, py); else { g.moveTo(px, py); started = true; } }
+    g.stroke();
+  });
+  if (opt.marker !== undefined) { g.strokeStyle = "#9b1c1c"; g.setLineDash([4, 3]); g.beginPath(); g.moveTo(X(opt.marker), box[1]); g.lineTo(X(opt.marker), box[1] + box[3]); g.stroke(); g.setLineDash([]); }
+  g.restore();
+  // legend
+  g.textAlign = "left"; g.textBaseline = "middle"; let lx = box[0] + 8;
+  names.forEach((n, i) => { const c = (opt.colors && opt.colors[n]) || COLORS[i % COLORS.length];
+    g.fillStyle = c; g.fillRect(lx, box[1] + 9, 14, 3); g.fillStyle = "#1f3a5f"; const t = opt.labels ? opt.labels(n) : n;
+    g.fillText(t, lx + 18, box[1] + 10); lx += 26 + g.measureText(t).width; });
+}
+
+// colour maps: control points (t, r, g, b)
+const CMAPS = {
+  div: [[0, 21, 50, 110], [0.25, 50, 120, 190], [0.5, 247, 247, 247], [0.75, 214, 96, 77], [1, 103, 0, 31]],
+  seq: [[0, 13, 8, 135], [0.25, 126, 3, 168], [0.5, 204, 71, 120], [0.75, 248, 149, 64], [1, 240, 249, 33]],
+};
+function cmapLUT(name) {
+  const cp = CMAPS[name], lut = new Uint8ClampedArray(256 * 3);
+  for (let i = 0; i < 256; i++) {
+    const t = i / 255; let k = 0; while (k < cp.length - 2 && t > cp[k + 1][0]) k++;
+    const a = cp[k], b = cp[k + 1], u = (t - a[0]) / (b[0] - a[0]);
+    for (let c = 0; c < 3; c++) lut[3 * i + c] = a[c + 1] + u * (b[c + 1] - a[c + 1]);
+  }
+  return lut;
+}
+const LUT = { div: cmapLUT("div"), seq: cmapLUT("seq") };
+
+let mapState = null;   // geometry of the last map drawing (for clicks)
+function drawMap(m, opt) {
+  const cv = $("map"), [g, W, H] = setupCanvas(cv);
+  if (!m) { g.fillStyle = "#8a9bb0"; g.fillText("no frames yet: run the deck or browse an output", 60, H / 2); mapState = null; return; }
+  const raw = Uint8Array.from(atob(m.data), c => c.charCodeAt(0));
+  const f = new Float32Array(raw.buffer), nz = m.nz, nx = m.nx;
+  let vmin = opt.vmin, vmax = opt.vmax;
+  if (m.signed) { const a = Math.max(Math.abs(vmin), Math.abs(vmax)) || 1; vmin = -a; vmax = a; }
+  else if (vmin === vmax) vmax = vmin + 1;
+  const lut = m.signed ? LUT.div : LUT.seq;
+  const img = new ImageData(nz, nx);   // columns: zeta (head on the right), rows: x from x1 (top) to x0
+  for (let i = 0; i < nz; i++) {
+    for (let j = 0; j < nx; j++) {
+      const v = f[i * nx + j]; let t = (v - vmin) / (vmax - vmin); t = t < 0 ? 0 : t > 1 ? 1 : t;
+      const L = 3 * Math.round(t * 255), p = 4 * ((nx - 1 - j) * nz + i);
+      img.data[p] = lut[L]; img.data[p + 1] = lut[L + 1]; img.data[p + 2] = lut[L + 2]; img.data[p + 3] = 255;
+    }
+  }
+  const box = [58, 8, W - 130, H - 46];
+  const off = document.createElement("canvas"); off.width = nz; off.height = nx; off.getContext("2d").putImageData(img, 0, 0);
+  g.imageSmoothingEnabled = true; g.drawImage(off, box[0], box[1], box[2], box[3]);
+  const [X, Y] = axes(g, box, [m.zeta0, m.zeta1], [m.x0, m.x1], { xlabel: "ζ (µm)", ylabel: tv() + " (µm)", grid: false });
+  // cuts
+  g.strokeStyle = "rgba(0,0,0,.55)"; g.setLineDash([5, 4]); g.lineWidth = 1;
+  if (opt.zcut >= m.zeta0 && opt.zcut <= m.zeta1) { g.beginPath(); g.moveTo(X(opt.zcut), box[1]); g.lineTo(X(opt.zcut), box[1] + box[3]); g.stroke(); }
+  if (opt.xcut >= m.x0 && opt.xcut <= m.x1) { g.beginPath(); g.moveTo(box[0], Y(opt.xcut)); g.lineTo(box[0] + box[2], Y(opt.xcut)); g.stroke(); }
+  g.setLineDash([]);
+  // colour bar
+  const cb = [W - 58, box[1], 12, box[3]];
+  for (let y = 0; y < cb[3]; y++) { const L = 3 * Math.round((1 - y / cb[3]) * 255); g.fillStyle = `rgb(${lut[L]},${lut[L + 1]},${lut[L + 2]})`; g.fillRect(cb[0], cb[1] + y, cb[2], 1.5); }
+  g.strokeStyle = "#8a9bb0"; g.strokeRect(...cb);
+  g.fillStyle = "#566e8e"; g.textAlign = "left"; g.textBaseline = "middle";
+  for (const t of niceTicks(vmin, vmax, 6)) g.fillText(fmt(t), cb[0] + 16, cb[1] + cb[3] * (1 - (t - vmin) / (vmax - vmin)));
+  mapState = { box, m };
+  return [vmin, vmax];
+}
+
+// ------------------------------------------------------------------ state
+const S = { frames: [], comps: [], cur: null, running: false, outdir: null, follow: true, playing: null,
+            fixed: null, beams: {}, lastFramesKey: "", lcomps: new Set(["ez", "ex"]), rcomps: new Set(["ez", "ne"]) };
+const withPlane = p => { p.plane = $("plane").value; return p; };
+
+function compBoxes(el, set, comps, redraw) {
+  el.innerHTML = "";
+  comps.forEach(c => {
+    const l = document.createElement("label"); l.className = "chk";
+    const b = document.createElement("input"); b.type = "checkbox"; b.checked = set.has(c);
+    b.onchange = () => { b.checked ? set.add(c) : set.delete(c); redraw(); };
+    l.append(b, lab(c)); el.append(l);
+  });
+}
+
+async function loadFrame() {
+  if (S.cur === null) { drawMap(null, {}); linePlot($("lines"), [], {}); linePlot($("rline"), [], {}); return; }
+  const step = S.cur, rmax = +$("mrmax").value || 0, comp = $("mcomp").value || S.comps[0];
+  const p = withPlane({ step, comp, nr: 260, nz: Math.min(1400, Math.max(200, Math.round($("map").clientWidth))) });
+  document.querySelectorAll(".tv").forEach(e => { e.textContent = tv(); });
+  if (S.outdir) p.outdir = S.outdir; if (rmax > 0) p.rmax = rmax;
+  try {
+    const m = await api("/api/map", p);
+    const fix = $("fixscale").checked;
+    const clip = $("clip").checked, lo = clip ? m.rlo : m.vmin, hi = clip ? m.rhi : m.vmax;
+    if (!fix || !S.fixed || S.fixed.comp !== comp || S.fixed.clip !== clip) S.fixed = { comp, clip, vmin: lo, vmax: hi };
+    drawMap(m, { vmin: S.fixed.vmin, vmax: S.fixed.vmax, zcut: +$("xicut").value, xcut: +$("rcut").value });
+    $("mapinfo").textContent = `${lab(comp)}   step ${step}   z = ${fmt(m.z_mm)} mm   range ${fmt(m.vmin)} … ${fmt(m.vmax)}`;
+  } catch (e) { $("mapinfo").textContent = e.message; }
+  drawLines(); drawRline();
+}
+
+async function drawLines() {
+  if (S.cur === null) return;
+  const comps = [...S.lcomps].filter(c => S.comps.includes(c));
+  const p = withPlane({ step: S.cur, comps: comps.join(","), x: +$("rcut").value || 0 }); if (S.outdir) p.outdir = S.outdir;
+  try { const d = comps.length ? await api("/api/lines", p) : { x: [], series: {} };
+    linePlot($("lines"), d.x, d.series, { xlabel: "ζ (µm)", labels: lab, marker: +$("xicut").value,
+             colors: Object.fromEntries(S.comps.map((c, i) => [c, COLORS[i % COLORS.length]])), empty: "select fields" });
+    $("lineinfo").textContent = comps.length ? `${tv()} = ${fmt(p.x)} µm` : "";
+  } catch (e) { $("lineinfo").textContent = e.message; }
+}
+
+async function drawRline() {
+  if (S.cur === null) return;
+  const comps = [...S.rcomps].filter(c => S.comps.includes(c));
+  const p = withPlane({ step: S.cur, comps: comps.join(","), zeta: +$("xicut").value || 0 }); if (S.outdir) p.outdir = S.outdir;
+  const rmax = +$("mrmax").value || 0; if (rmax > 0) p.rmax = rmax;
+  try { const d = comps.length ? await api("/api/rline", p) : { x: [], series: {} };
+    linePlot($("rline"), d.x, d.series, { xlabel: tv() + " (µm)", labels: lab, marker: +$("rcut").value,
+             colors: Object.fromEntries(S.comps.map((c, i) => [c, COLORS[i % COLORS.length]])), empty: "select fields" });
+    $("rinfo").textContent = comps.length ? `ζ = ${fmt(d.zeta)} µm` : "";
+  } catch (e) { $("rinfo").textContent = e.message; }
+}
+
+function drawBeams() {
+  const q = $("bq").value, all = Object.keys(S.beams), sel = $("bsel");
+  if ([...sel.options].length !== all.length + 1) {
+    const v = sel.value; sel.innerHTML = '<option value="">all</option>' + all.map(n => `<option>${n}</option>`).join("");
+    sel.value = all.includes(v) ? v : "";
+  }
+  const names = sel.value ? [sel.value] : all;
+  if (!names.length) { linePlot($("beams"), [], {}, { empty: "no diag.txt yet" }); return; }
+  // all bunches (and 'trapped', inj_*) have one line per step: same z array
+  const z = S.beams[names[0]].z_mm, series = {};
+  for (const n of names) if (S.beams[n].z_mm.length === z.length) series[n] = S.beams[n][q];
+  linePlot($("beams"), z, series, { xlabel: "z (mm)", ylabel: $("bq").selectedOptions[0].textContent });
+}
+
+async function refreshFrames(force = false) {
+  const p = S.outdir ? { outdir: S.outdir } : {};
+  let f; try { f = await api("/api/frames", p); } catch (e) { return; }
+  const key = f.frames.join(",") + "|" + f.comps.join(",");
+  if (f.comps.length && f.comps.join(",") !== S.comps.join(",")) {
+    S.comps = f.comps;
+    const sel = $("mcomp"), old = sel.value;
+    sel.innerHTML = S.comps.map(c => `<option value="${c}">${lab(c)}</option>`).join("");
+    sel.value = S.comps.includes(old) ? old : (S.comps.includes("ez") ? "ez" : S.comps[0]);
+    compBoxes($("lcomps"), S.lcomps, S.comps, drawLines);
+    compBoxes($("rcomps"), S.rcomps, S.comps, drawRline);
+    if (f.zeta && !$("xicut").dataset.set) $("xicut").value = +(0.5 * (f.zeta[0] + f.zeta[1])).toPrecision(4);
+  }
+  S.frames = f.frames;
+  const sl = $("frame"); sl.max = Math.max(0, S.frames.length - 1);
+  if (!S.frames.length) { S.cur = null; $("frinfo").textContent = "no frames"; if (force || key !== S.lastFramesKey) loadFrame(); S.lastFramesKey = key; return; }
+  let idx = S.frames.indexOf(S.cur);
+  if (idx < 0 || ($("follow").checked && !S.playing)) idx = S.frames.length - 1;
+  sl.value = idx;
+  const changed = S.frames[idx] !== S.cur;
+  S.cur = S.frames[idx];
+  $("frinfo").textContent = `frame ${idx + 1}/${S.frames.length}  (step ${S.cur})`;
+  if (changed || force) loadFrame();
+  S.lastFramesKey = key;
+  if (f.beams) { try { S.beams = await api("/api/beams", p); } catch (e) {} drawBeams(); }
+}
+
+async function poll() {
+  try {
+    const s = await api("/api/status");
+    S.running = s.running;
+    const pill = $("pill");
+    if (s.running) { pill.className = "pill run"; pill.textContent = s.step >= 0 ? `running: step ${s.step}${s.steps ? " / " + s.steps : ""}   z = ${fmt(s.z)} mm` : "starting…"; }
+    else if (s.rc === null) { pill.className = "pill"; pill.textContent = "idle"; }
+    else if (s.rc === 0) { pill.className = "pill done"; pill.textContent = `finished (${Math.round(s.elapsed)} s)`; }
+    else { pill.className = "pill err"; pill.textContent = `stopped (exit code ${s.rc})`; }
+    const frac = s.steps > 0 && s.step >= 0 ? Math.min(1, s.step / s.steps) : (s.running ? 0.02 : (s.rc === 0 ? 1 : 0));
+    $("bar").firstElementChild.style.width = (100 * frac) + "%";
+    $("brun").disabled = s.running; $("bstop").disabled = !s.running;
+    const log = $("log"), atEnd = log.scrollTop + log.clientHeight >= log.scrollHeight - 4;
+    const txt = s.log.join("\n"); if (log.textContent !== txt) { log.textContent = txt; if (atEnd) log.scrollTop = log.scrollHeight; }
+    if (s.outdir) S.outdir = s.outdir;
+    await refreshFrames();
+  } catch (e) { $("pill").className = "pill err"; $("pill").textContent = "no connection to the GUI server"; }
+  setTimeout(poll, S.running ? 1000 : 2500);
+}
+
+// ------------------------------------------------------------------ actions
+async function openDeck(path) {
+  try { const d = await api("/api/deck", { path }); $("path").value = d.path; $("editor").value = d.text; $("hdeck").textContent = d.path; }
+  catch (e) { alert(e.message); }
+}
+$("bload").onclick = () => openDeck($("path").value);
+$("examples").onchange = e => { if (e.target.value) openDeck(e.target.value); e.target.value = ""; };
+$("bsave").onclick = async () => { try { const d = await api("/api/save", {}, { path: $("path").value, text: $("editor").value }); $("hdeck").textContent = d.path; } catch (e) { alert(e.message); } };
+$("brun").onclick = async () => {
+  const body = { path: $("path").value, text: $("editor").value, threads: +$("threads").value, ranks: +$("ranks").value,
+    every: +$("every").value, extra: $("extra").value };
+  try { await api("/api/run", {}, body); S.cur = null; S.frames = []; S.fixed = null; S.beams = {}; $("hdeck").textContent = body.path; $("follow").checked = true; }
+  catch (e) { alert(e.message); }
+};
+$("bstop").onclick = () => api("/api/stop", {}, {});
+$("bcheck").onclick = async () => {
+  try { const d = await api("/api/check", {}, { path: $("path").value, text: $("editor").value, extra: $("extra").value });
+    $("log").textContent = (d.ok ? "deck OK\n\n" : "deck has errors\n\n") + d.messages.join("\n"); $("hdeck").textContent = $("path").value; }
+  catch (e) { alert(e.message); }
+};
+$("bbrowse").onclick = async () => { try { const d = await api("/api/open", {}, { path: $("path").value, text: $("editor").value }); S.outdir = d.outdir; S.cur = null; refreshFrames(true); } catch (e) { alert(e.message); } };
+$("frame").oninput = e => { S.cur = S.frames[+e.target.value]; $("follow").checked = false; $("frinfo").textContent = `frame ${+e.target.value + 1}/${S.frames.length}  (step ${S.cur})`; loadFrame(); };
+$("bplay").onclick = () => {
+  if (S.playing) { clearInterval(S.playing); S.playing = null; $("bplay").textContent = "▶"; return; }
+  $("follow").checked = false; $("bplay").textContent = "❚❚";
+  S.playing = setInterval(() => { if (!S.frames.length) return; let i = S.frames.indexOf(S.cur) + 1; if (i >= S.frames.length) i = 0;
+    S.cur = S.frames[i]; $("frame").value = i; $("frinfo").textContent = `frame ${i + 1}/${S.frames.length}  (step ${S.cur})`; loadFrame(); }, 600);
+};
+for (const id of ["mcomp", "plane", "fixscale", "clip"]) $(id).onchange = () => loadFrame();
+$("mrmax").onchange = () => loadFrame();
+$("rcut").onchange = () => loadFrame();
+$("xicut").onchange = () => { $("xicut").dataset.set = 1; loadFrame(); };
+$("bq").onchange = drawBeams; $("bsel").onchange = drawBeams;
+$("map").onclick = ev => {
+  if (!mapState) return;
+  const { box, m } = mapState, r = $("map").getBoundingClientRect();
+  const x = ev.clientX - r.left, y = ev.clientY - r.top;
+  if (x < box[0] || x > box[0] + box[2] || y < box[1] || y > box[1] + box[3]) return;
+  const u = (x - box[0]) / box[2], v = 1 - (y - box[1]) / box[3];
+  $("xicut").value = +(m.zeta0 + u * (m.zeta1 - m.zeta0)).toPrecision(5); $("xicut").dataset.set = 1;
+  $("rcut").value = +(m.x0 + v * (m.x1 - m.x0)).toPrecision(3);
+  loadFrame();
+};
+let rs; window.onresize = () => { clearTimeout(rs); rs = setTimeout(() => { loadFrame(); drawBeams(); }, 150); };
+$("editor").addEventListener("keydown", e => {   // tab inserts spaces
+  if (e.key === "Tab") { e.preventDefault(); const t = e.target, s = t.selectionStart; t.setRangeText("    ", s, t.selectionEnd, "end"); }
+  if ((e.ctrlKey || e.metaKey) && e.key === "s") { e.preventDefault(); $("bsave").click(); }
+});
+
+(async () => {
+  try {
+    const d = await api("/api/init");
+    $("path").value = d.deck; $("editor").value = d.text; $("hdeck").textContent = d.deck;
+    $("threads").value = Math.max(1, Math.min(8, d.cpus)); $("threads").max = d.cpus;
+    if (!d.mpirun) { $("ranks").disabled = true; $("ranks").title = "mpirun not found"; }
+    $("examples").innerHTML = '<option value="">examples…</option>' + d.examples.map(p => `<option value="${p}">${p.split("/").slice(-2).join("/")}</option>`).join("");
+  } catch (e) { alert("GUI server: " + e.message); }
+  poll();
+})();
+</script>
+</body>
+</html>

@@ -1,4 +1,5 @@
-// Structured ASCII input deck: blocks `name { key = value }`, comments with '#',
+// Structured ASCII input deck: blocks `name { key = value }`, comments with '#'; a repeated `laser` block
+// becomes laser2, laser3, ... (also for overrides: laser2.a0=...);
 // values with physical units, command-line overrides `block.key=value`.
 #pragma once
 #include <map>
@@ -6,7 +7,7 @@
 #include <string>
 #include <vector>
 
-enum class Kind { None, Length, Time, Charge, Angle };
+enum class Kind { None, Length, Time, Charge, Angle, Density };
 
 class Deck {
 public:

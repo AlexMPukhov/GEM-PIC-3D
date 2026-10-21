@@ -25,7 +25,12 @@ Deck Deck::read(const std::string& file) {
             auto br = line.find('{');
             if (br == std::string::npos) throw err("expected 'block {'");
             block = trim(line.substr(0, br));
-            if (d.blocks_.count(block)) throw err("block '" + block + "' given twice");
+            if (d.blocks_.count(block)) {
+                if (block != "laser") throw err("block '" + block + "' given twice");
+                int k = 2;
+                while (d.blocks_.count(block + std::to_string(k))) ++k;
+                block += std::to_string(k);
+            }
             d.blocks_[block];
             line = trim(line.substr(br + 1));
             if (line.empty()) continue;
@@ -51,7 +56,7 @@ void Deck::override_from(const std::string& a) {
     auto dot = a.find('.'), eq = a.find('=');
     if (dot == std::string::npos || eq == std::string::npos || dot > eq)
         throw std::runtime_error("override '" + a + "' must read block.key=value");
-    set(a.substr(0, dot), a.substr(dot + 1, eq - dot - 1), a.substr(eq + 1), -1);
+    set(trim(a.substr(0, dot)), trim(a.substr(dot + 1, eq - dot - 1)), trim(a.substr(eq + 1)), -1);
 }
 
 bool Deck::has(const std::string& b, const std::string& k) const {
@@ -126,6 +131,7 @@ double parse_with_unit(const std::string& text, Kind kind, const std::string& wh
         {"cm", {Kind::Length, 1e-2}}, {"m", {Kind::Length, 1.0}},
         {"fs", {Kind::Time, 1e-15}}, {"ps", {Kind::Time, 1e-12}}, {"ns", {Kind::Time, 1e-9}},
         {"pC", {Kind::Charge, 1e-12}}, {"nC", {Kind::Charge, 1e-9}},
+        {"cm^-3", {Kind::Density, 1e6}}, {"m^-3", {Kind::Density, 1.0}},
         {"rad", {Kind::Angle, 1.0}}, {"mrad", {Kind::Angle, 1e-3}}, {"deg", {Kind::Angle, M_PI / 180}}};
     if (unit.empty()) {
         if (kind == Kind::None || kind == Kind::Angle) return v;   // a bare angle is in radians
