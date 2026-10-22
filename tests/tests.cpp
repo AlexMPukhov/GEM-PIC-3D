@@ -30,8 +30,7 @@ int main(int argc, char** argv) {
     test_constant_tables(false);
     test_plasma_wake_1d(true);
     test_plasma_wake_1d(false);
-    test_plasma_wake_beam(false);
-    test_plasma_wake_beam(true);
+    test_plasma_wake_beam();
     test_smoothing_divergence();
     test_streaming_kinematics();
     std::printf("%s: %d failure(s)\n", failures ? "FAILED" : "ALL PASSED", failures);

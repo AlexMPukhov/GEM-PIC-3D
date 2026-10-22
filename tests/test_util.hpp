@@ -49,6 +49,6 @@ void test_equilibrium(bool freehand);
 void test_sponge(bool freehand);
 void test_constant_tables(bool yfourier);
 void test_plasma_wake_1d(bool extrap);
-void test_plasma_wake_beam(bool freehand);
+void test_plasma_wake_beam();
 void test_smoothing_divergence();
 void test_streaming_kinematics();
