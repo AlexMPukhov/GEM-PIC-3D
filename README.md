@@ -20,11 +20,12 @@ with the radiation of the bunch resolved on the grid and acting back on it
 
 ```
 make                      # build/gempic3d and build/tests (C++17, OpenMP, no external libraries)
-make test                 # 58 checks against analytic references, a few minutes on one core
+make test                 # 68 checks against analytic references, a few minutes on one core
 make MPI=1 BUILD=build-mpi                 # MPI (mpicxx); test: sh tests/mpi.sh build-mpi/gempic3d
 make CUDA=1 NVCC=nvcc CUDA_ARCH=-arch=sm_80 BUILD=build-gpu    # GPU (nvcc, cuFFT); add MPI=1 for both
 make EMU=1 BUILD=build-emu test emu-selftest   # the GPU code paths on the CPU (GPU emulator, see Parallelism)
 make FFTW=1 BUILD=build-fftw               # optional: FFTW 3 instead of the own FFT (CPU builds)
+make HDF5=1 BUILD=build-h5                 # optional: openPMD output (HDF5); test: sh tests/openpmd.sh build-h5/gempic3d
 build/gempic3d examples/oblique_plane_wave.deck --check            # summary and memory estimate
 build/gempic3d examples/oblique_plane_wave.deck                    # run, results in oblique/
 build/gempic3d examples/oblique_plane_wave.deck laser.enabled=false output.dir=ref   # reference
@@ -138,7 +139,7 @@ is not periodic in the box; only grid indices wrap.
 
 ## Plasma
 
-Stage 1 of the physics of GEM-PIC-RZ, with the same algorithm (`src/sim.cpp`, section "plasma"):
+Stage 1 of the physics of GEM-PIC-RZ, with the same algorithm (`src/sim_plasma.cpp`):
 
 - **Plasma block:** `density` (cm^-3 or n_c), a longitudinal profile (`z_points`, `z_values`, linear between
   the points, constant beyond them), uniform or `parabolic` channel (`channel_depth` at `r_channel`), column
@@ -170,7 +171,7 @@ Stage 1 of the physics of GEM-PIC-RZ, with the same algorithm (`src/sim.cpp`, se
 - **Net current:** with plasma the k⊥ = 0 current is kept (a 1D plasma wave, not a net current in a periodic box),
   and the sponge uses the bound field of the beam list only.
 - **Not yet:** MPI (plasma runs on one rank), mobile ions, field ionization, several bunches, external fields
-  and undulators, profiles as expressions, HDF5/openPMD output and checkpoints (the next stages).
+  and undulators, profiles as expressions and checkpoints (the next stages).
 
 ## GUI
 
@@ -279,12 +280,58 @@ real GPU is still to be done.
 | | `smooth_length` | 0 | bubble closure: smoothing length of the plasma currents |
 | numerics | `iterations`, `predictor` | 2, extrapolate | passes per slice; prediction of the streaming current (`previous`: as GEM-PIC-RZ) |
 | | `vz_min`, `vz_beam`, `trap_advance` | 0.8, 0.9, 1 | trapping and return to streaming, as in GEM-PIC-RZ |
-| output | `dir`, `every`, `particles`, `frames` | out, 10, true, false | `frames`: frame_NNNNN.bin for the GUI |
+| output | `dir`, `every`, `particles`, `frames` | out, 10, true, false | `every`: period of `diag.txt` and of the main output's fields; `particles`: start/end dumps; `frames`: frame_NNNNN.bin for the GUI |
+| | `fields`, `beam_every`, `beams`, `axis` | all, 0, all, false | main output group (see Output) |
+| | `format`, `xi_stride`, `particle_stride` | native, 1, 1 | `native`, `openpmd` or `both` |
+| | `openpmd_file`, `openpmd_grid`, `openpmd_dy`, `openpmd_dzeta`, `hdf5_single`, `hdf5_compression` | openpmd/data_%06T, uniform, smallest step, true, 0 | openPMD settings |
+| diag | `names` | — | diagnostic groups, each a block `diag.<name>` with the keys of the output group (`every` 0, `beam_every` = every, format and openPMD settings from `output`) |
 
 `diag.txt` has one line per output step: z, the centroid (x, y, ζ), the rms sizes, ⟨p_x⟩, ⟨p_y⟩,
 ⟨p_z⟩, ⟨γ⟩, ⟨p·k̂⟩ (along the laser), the rms of p_z, the position of the bunch in the pulse
 (η − η_c in FWHM), the local amplitude a0 g, and the field and kinetic energy in J. `particles_start.txt`
 and `particles_end.txt` hold the macroparticles.
+
+## Output
+
+The output follows the common specification of QUARZ, GEM-PIC-RZ and GEM-PIC-3D (`docs/output_spec.md`).
+The main output (block `output`) and the diagnostic groups (`diag.names`, blocks `diag.<name>`, written to
+`<output.dir>/<name>/`) each write fields every `every` and beam particles every `beam_every` steps, restricted
+to their `fields` (`ex ey ez bx by bz ne`, `all`, `none`) and `beams` (`bunch trapped`, `all`, `none`), in their
+`format`. Example: all fields every 100 steps in openPMD, E_z and the axis every 5 steps:
+
+```
+output {
+  every      = 100
+  beam_every = 100
+  format     = openpmd
+}
+diag {
+  names = light
+}
+diag.light {
+  every  = 5
+  fields = ez
+  beams  = none
+  axis   = true
+}
+```
+
+- **`fields_NNNNNN.bin`** (native): the selected components in the planes y = 0 and x = 0, in the format of
+  the GUI frames (one JSON header line with the grids and the component list, then float32 arrays).
+- **`beam_<species>_NNNNNN.txt`** (native): x, y, ζ [µm], p_x, p_y, p_z [m c], weight [real electrons].
+- **`axis_NNNNNN.txt`** (`axis = true`): ζ [µm], E_z, E_x − B_y, E_y + B_x [m c ω0/e] on the axis, and n_e/n0
+  with plasma.
+- **openPMD** (`format = openpmd` or `both`, build with `make HDF5=1`): openPMD 1.1.0, one HDF5 file per output
+  step (`openpmd/data_%06T.h5`), basePath `/data/%T/`. Meshes `E`, `B` (x, y, z) and `n_e` (with plasma),
+  geometry cartesian, data [ζ][y][x], SI through `unitSI`. A level s is shown at t = s/c with z = s + ζ
+  (`gridGlobalOffset`); in the GT2 frame its data lie on the plane z = s at the times t = s − ζ. On uniform grids
+  (Fourier y, uniform ζ) the records are the code's own nodes; on free-hand grids `openpmd_grid = uniform`
+  interpolates to a uniform grid (spacing `openpmd_dy`, `openpmd_dzeta`, default the smallest step), `native`
+  writes `native_E_x`, … on the code's staggered nodes with their positions in `gridCoordinates` (the
+  rectilinear meshes of GEM-PIC-RZ and QUARZ), `both` writes both. Particles `bunch` and `trapped`: position
+  (z = ζ, positionOffset z = s), momentum per real particle, weighting, charge, mass, one particle patch. The
+  input deck after the overrides is stored in `/data/<T>/input_deck`. The fields are those of the end of the
+  step, as used by the next push.
 
 ## Validation (`make test`, `tests/mpi.sh`)
 
@@ -301,11 +348,12 @@ and `particles_end.txt` hold the macroparticles.
 | constant-step ζ table against the uniform ζ grid, with Fourier y and with the free-hand y | bit for bit |
 | MPI, 2/3/4 ranks against 1 rank (`tests/mpi.sh`), Fourier y and free-hand y | identical |
 | plasma, 1D linear wake of a Gaussian laser pulse (a0 = 0.05, n0 = 0.01 n_c) against cold-fluid theory: amplitude, plasma wavelength; predictor extrapolate / previous | 0.8 %, 3e-5; 2.5 %, 3e-5 |
-| plasma, 3D linear wake of a narrow bunch on the axis against linear theory (K0 Green's function), Fourier y and free-hand y | **open: 21 % rms after 3 steps, ~9 % after 25** (amplitude to a few %, phase shifted by ~0.1 rad; under investigation) |
+| plasma, 3D linear wake of a narrow rigid bunch on the axis after 30 steps against the linear theory of the discrete scheme (plasma frequency k_p S(k) per transverse mode, S = TSC shape); free-hand y against Fourier y | 1.9 %; 1.7 % (the continuum theory differs by 9.7 %: the TSC shape, not an error) |
 | plasma, smoothing commutes with the divergence (free-hand y) | 4e-16 |
 | streaming in vacuum: a fast electron is trapped at ζ0 − (1 − v_z) Δ/v_z and moves on in the beam list; a slow one returns to streaming | 1e-9 |
 | GUI (`tests/gui.sh`): frames, cuts, 2 ranks = 1 rank, plasma frames | pass |
-| all of the above in the GPU emulator (`make EMU=1 test`, `tests/mpi.sh build-emu-mpi/gempic3d`); FFTW build | pass; pass |
+| output groups and openPMD (`tests/openpmd.sh`): periods and selections of two groups, openPMD attributes and input deck, particles = native beam file, fields = native field file and axis file on a uniform grid | pass; 1.5e-7; exact; 1.5e-11 |
+| all of the above in the GPU emulator (`make EMU=1 test`, `tests/mpi.sh build-emu-mpi/gempic3d`); FFTW build | pass; pass (before the output groups; to be rerun) |
 
 With the default grids (Fourier y, uniform ζ) the code reproduces the previous version (commit cf3ee50)
 up to rounding, except in the sponge, whose bound field now includes the factor (1 + β) and the 1/γ²
@@ -317,10 +365,10 @@ At 2.5 FWHM the residual A ~ 10⁻³ a0, amplified by the cross term 2p⊥0·A/h
 
 ## Limits and next steps
 
-- **Plasma, open check:** the 3D linear wake of a narrow bunch differs from linear theory by about 9 % rms
-  (a phase shift of ~0.1 rad behind the bunch), also with a density up-ramp. Whether this is a start-up
-  transient of the forward field R or an error of the transverse plasma response is not yet known; the check
-  is reported as OPEN by `make test`. Use the plasma model for exploration only until this is resolved.
+- **Plasma, transverse resolution:** the TSC shape lowers the plasma frequency of a transverse mode k to
+  k_p S(k), S = sinc³(k_x Δx/2) sinc³(k_y Δy/2). A bunch with σ/Δx = 2.7 (the 3D wake check) gets a wake
+  about 10 % off the continuum theory; resolve the wake modes accordingly (or compare with the theory of the
+  scheme, as the check does).
 - **Plasma, performance:** the march goes slice by slice with plasma (FFTs of single planes); the LWFA example
   takes about 25 s per step on one core.
 
@@ -341,5 +389,5 @@ At 2.5 FWHM the residual A ~ 10⁻³ a0, amplified by the cross term 2p⊥0·A/h
   in the x–z plane; use Fourier y when the bunch moves in y.
 - **Grid fields over a step.** The grid fields are frozen at level s0 during the particle step, as in
   GEM-PIC-RZ; the laser is exact. Halving `dz` checks this.
-- **Performance.** No checkpoints or HDF5/openPMD output yet; the GPU build has run only in the emulator. The
+- **Performance.** No checkpoints yet; the GPU build has run only in the emulator. The
   production deck needs about 13 GB in total (256 bytes per point), split over the MPI ranks.
