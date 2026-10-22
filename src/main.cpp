@@ -33,17 +33,18 @@ int main(int argc, char** argv) {
             if (comm.rank == 0 && !f) throw std::runtime_error("cannot write " + c.dir + "/diag.txt");
             sim.diagnostics(f, true);
             char fn[64];
-            bool first_axis = true;
+            // GUI frames every output.every steps; output groups (output, diag.<name>) at their own periods
             auto frame = [&]() {
                 if (c.frames) { std::snprintf(fn, sizeof fn, "/frame_%05ld.bin", sim.istep); sim.write_frame(c.dir + fn); }
-                if (c.axis) { sim.write_axis(c.dir + "/axis.txt", first_axis); first_axis = false; }
             };
             frame();
+            sim.write_outputs(true);
             if (c.dump_particles) sim.dump_particles(c.dir + "/particles_start.txt");
             auto t0 = std::chrono::steady_clock::now();
             while (!sim.finished()) {
                 sim.step();
                 if (sim.istep % c.every == 0) { sim.diagnostics(f, false); frame(); }
+                sim.write_outputs(false);
             }
             if (sim.istep % c.every) { sim.diagnostics(f, false); frame(); }
             if (c.dump_particles) sim.dump_particles(c.dir + "/particles_end.txt");

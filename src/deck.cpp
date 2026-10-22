@@ -53,8 +53,10 @@ void Deck::set(const std::string& b, const std::string& k, const std::string& v,
 }
 
 void Deck::override_from(const std::string& a) {
-    auto dot = a.find('.'), eq = a.find('=');
-    if (dot == std::string::npos || eq == std::string::npos || dot > eq)
+    // block.key=value; the block name may contain dots (diag.light.every=5: block diag.light, key every)
+    const auto eq = a.find('=');
+    const auto dot = eq == std::string::npos ? std::string::npos : a.rfind('.', eq);
+    if (dot == std::string::npos || eq == std::string::npos)
         throw std::runtime_error("override '" + a + "' must read block.key=value");
     set(trim(a.substr(0, dot)), trim(a.substr(dot + 1, eq - dot - 1)), trim(a.substr(eq + 1)), -1);
 }
@@ -142,4 +144,14 @@ double parse_with_unit(const std::string& text, Kind kind, const std::string& wh
     if (it == units.end()) throw std::runtime_error(where + ": unknown unit '" + unit + "'");
     if (it->second.first != kind) throw std::runtime_error(where + ": unit '" + unit + "' is of the wrong kind");
     return v * it->second.second;
+}
+
+std::string Deck::text() const {
+    std::string t;
+    for (const auto& b : blocks_) {
+        t += b.first + " {\n";
+        for (const auto& kv : b.second) t += "  " + kv.first + " = " + kv.second + "\n";
+        t += "}\n";
+    }
+    return t;
 }
