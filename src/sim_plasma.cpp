@@ -137,6 +137,9 @@ void Simulation::setup_plasma() {
     for (Buf<cpx>* p : {&js0x, &js0y, &js0z}) p->resize((ns + 1) * pl);
     jsr.resize(4 * pl);
     rho_lines.resize(size_t(N) * (cfg.nx + cfg.ny));
+    bool ne = false;                             // openPMD n_e: the charge density of every half-cell
+    for (const auto& g : cfg.groups) ne = ne || (g.openpmd && (g.fields >> 6 & 1));
+    if (ne) rho_full.resize(size_t(N - 1) * pl);
     jsn.resize(3 * pl); jsin.resize(3 * pl); bk.resize(4 * pl); sp3.resize(3 * pl);
     jpred.resize(3 * pl); jtmp.resize(3 * pl); jsi0.resize(3 * pl); dlt.resize(3 * pl);
     if (!yf && scp.size() == 0) {
@@ -418,6 +421,10 @@ void Simulation::march_plasma(double s0, double s1) {
             const int j0 = yf ? ((int(std::lround(-Y0 / dy)) % ny) + ny) % ny : ny / 2;
             const double* J = jsr.data() + 3 * nkk; double* rl = rho_lines.data() + long(n) * (nx + ny);
             par_for(nx + ny, [=] HD(long k) { rl[k] = k < nx ? J[long(j0) * nx + k] : J[(k - nx) * nx + i0]; });
+            if (rho_full.size()) {               // and in the whole half-cell (openPMD n_e)
+                float* rf = rho_full.data() + long(n) * nkk;
+                par_for(nk, [=] HD(long i) { rf[i] = float(J[i]); });
+            }
         }
         {   // half-cell n is final: correct R at slice n+1 for the prediction it used, keep the change for the
             // extrapolation and the current as the prediction of the next step
