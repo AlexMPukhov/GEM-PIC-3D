@@ -4,7 +4,8 @@
 # make EMU=1           GPU code paths on the CPU (src/emu: CUDA runtime and cuFFT emulated, device memory
 #                      protected outside kernels); combine with MPI=1
 # make FFTW=1          CPU build with FFTW 3 instead of the own FFT (-lfftw3 -lfftw3_omp)
-SRC = src/deck.cpp src/grid.cpp src/sim.cpp src/comm.cpp
+SIM = src/sim_config.cpp src/sim_setup.cpp src/sim_particles.cpp src/sim_fields.cpp src/sim_plasma.cpp src/sim_output.cpp
+SRC = src/deck.cpp src/grid.cpp $(SIM) src/comm.cpp
 HDR = $(wildcard src/*.hpp src/emu/*.h)
 BUILD ?= build
 ifeq ($(CUDA),1)
@@ -38,9 +39,10 @@ all: $(BUILD)/gempic3d $(BUILD)/tests
 $(BUILD)/gempic3d: $(SRC) src/main.cpp $(HDR)
 	@mkdir -p $(BUILD)
 	$(CXX) $(CXXFLAGS) -o $@ $(SRC) src/main.cpp $(LDLIBS)
-$(BUILD)/tests: $(SRC) tests/tests.cpp $(HDR)
+TESTS = tests/tests.cpp tests/test_fields.cpp tests/test_bunch.cpp tests/test_plasma.cpp
+$(BUILD)/tests: $(SRC) $(TESTS) tests/test_util.hpp $(HDR)
 	@mkdir -p $(BUILD)
-	$(CXX) $(CXXFLAGS) -Isrc -o $@ $(SRC) tests/tests.cpp $(LDLIBS)
+	$(CXX) $(CXXFLAGS) -Isrc -o $@ $(SRC) $(TESTS) $(LDLIBS)
 test: $(BUILD)/tests
 	$(BUILD)/tests
 emu-selftest: tests/emu_selftest.cpp $(HDR)
