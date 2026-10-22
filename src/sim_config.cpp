@@ -214,8 +214,83 @@ Config Config::from_deck(const Deck& d) {
     c.every = int(d.integer("output", "every", 10));
     c.dump_particles = d.flag("output", "particles", true);
     c.frames = d.flag("output", "frames", false);
-    c.axis = d.flag("output", "axis", false);
+    // output groups (as in QUARZ): the main output (block output) and the diagnostics diag.<name>
+    auto words = [](std::string t) {
+        for (char& ch : t) if (ch == ',') ch = ' ';
+        std::vector<std::string> w;
+        std::istringstream is(t);
+        for (std::string x; is >> x;) w.push_back(x);
+        return w;
+    };
+    auto group = [&](const std::string& b, const std::string& name, const OutGroup* main) {
+        OutGroup g;
+        g.name = name; g.dir = name.empty() ? c.dir : c.dir + "/" + name;
+        g.every = int(d.integer(b, "every", main ? 0 : 10));
+        g.beam_every = int(d.integer(b, "beam_every", main ? g.every : 0));
+        if (g.every < 0 || g.beam_every < 0) throw std::runtime_error(b + ": every and beam_every must be >= 0");
+        static const char* fn[7] = {"ex", "ey", "ez", "bx", "by", "bz", "ne"};
+        const std::string fs = d.str(b, "fields", "all");
+        if (fs == "all") g.fields = 127;
+        else if (fs == "none") g.fields = 0;
+        else {
+            g.fields = 0;
+            for (const auto& w : words(fs)) {
+                int k = 0;
+                while (k < 7 && w != fn[k]) ++k;
+                if (k == 7) throw std::runtime_error(b + ".fields: unknown component '" + w + "' (ex ey ez bx by bz ne, all, none)");
+                g.fields |= 1 << k;
+            }
+        }
+        const std::string bs = d.str(b, "beams", "all");
+        if (bs == "all") g.beams = 3;
+        else if (bs == "none") g.beams = 0;
+        else {
+            g.beams = 0;
+            for (const auto& w : words(bs)) {
+                if (w == "bunch") g.beams |= 1;
+                else if (w == "trapped") g.beams |= 2;
+                else throw std::runtime_error(b + ".beams: unknown beam '" + w + "' (bunch trapped, all, none)");
+            }
+        }
+        g.axis = d.flag(b, "axis", false);
+        const std::string fmt = d.str(b, "format", main ? (main->openpmd ? (main->native ? "both" : "openpmd") : "native") : "native");
+        if (fmt == "native") { g.native = true; g.openpmd = false; }
+        else if (fmt == "openpmd") { g.native = false; g.openpmd = true; }
+        else if (fmt == "both") { g.native = g.openpmd = true; }
+        else throw std::runtime_error(b + ".format must be native, openpmd or both");
+        g.xi_stride = int(d.integer(b, "xi_stride", 1));
+        g.particle_stride = int(d.integer(b, "particle_stride", 1));
+        if (g.xi_stride < 1 || g.particle_stride < 1) throw std::runtime_error(b + ": xi_stride and particle_stride must be >= 1");
+        g.openpmd_file = d.str(b, "openpmd_file", main ? main->openpmd_file : "openpmd/data_%06T");
+        {
+            const size_t pc = g.openpmd_file.find('%'), te = pc == std::string::npos ? pc : g.openpmd_file.find('T', pc);
+            bool ok = te != std::string::npos;
+            for (size_t k = pc + 1; ok && k < te; ++k) ok = std::isdigit((unsigned char)g.openpmd_file[k]);
+            if (!ok) throw std::runtime_error(b + ".openpmd_file needs %T or %0<n>T for the step");
+        }
+        const std::string grid = d.str(b, "openpmd_grid", main ? (main->openpmd_uniform ? (main->openpmd_native ? "both" : "uniform") : "native") : "uniform");
+        if (grid == "uniform") { g.openpmd_uniform = true; g.openpmd_native = false; }
+        else if (grid == "native") { g.openpmd_uniform = false; g.openpmd_native = true; }
+        else if (grid == "both") { g.openpmd_uniform = g.openpmd_native = true; }
+        else throw std::runtime_error(b + ".openpmd_grid must be uniform, native or both");
+        g.openpmd_dy = Ld(b, "openpmd_dy", main ? main->openpmd_dy : 0);
+        g.openpmd_dzeta = Ld(b, "openpmd_dzeta", main ? main->openpmd_dzeta : 0);
+        g.hdf5_single = d.flag(b, "hdf5_single", main ? main->hdf5_single : true);
+        g.hdf5_compression = int(d.integer(b, "hdf5_compression", main ? main->hdf5_compression : 0));
+        if (g.hdf5_compression < 0 || g.hdf5_compression > 9) throw std::runtime_error(b + ".hdf5_compression must be 0..9");
+        if (g.openpmd) c.openpmd = true;
+        return g;
+    };
+    c.groups.push_back(group("output", "", nullptr));
+    if (c.groups[0].every != c.every) c.groups[0].every = c.every;   // output.every: diag.txt and the main group
+    for (const auto& n : words(d.str("diag", "names", ""))) {
+        const std::string b = "diag." + n;
+        if (!d.has_block(b)) throw std::runtime_error("diag.names: no block '" + b + "'");
+        for (const auto& g : c.groups) if (g.name == n) throw std::runtime_error("diag.names: '" + n + "' given twice");
+        c.groups.push_back(group(b, n, &c.groups[0]));
+    }
     c.freeze_bunch = d.flag("numerics", "freeze_bunch", false);
+    c.deck_text = d.text();                            // the deck after overrides, stored in openPMD files
     d.check_unused();
     return c;
 }
@@ -253,8 +328,18 @@ void Config::summary(FILE* f, int ranks) const {
         std::fprintf(f, "  plasma: n0 = %.4g cm^-3 (%.4g n_c), %s, r_max = %.4g um, %d x %d per cell, smooth_length %.4g um; %d passes per slice, predictor %s, vz_min %.3g, vz_beam %.3g\n",
                      n0 * nc * 1e-6, n0, parabolic ? "parabolic channel" : "uniform", r_max < 1e299 ? r_max * um : -1.0, ppc_x, ppc_y,
                      smooth_length * um, iterations, predictor_extrapolate ? "extrapolate" : "previous", vz_min, vz_beam);
-    std::fprintf(f, "  output: dir '%s', every %d steps (%ld steps to z_end)%s%s\n", dir.c_str(), every,
-                 long(std::ceil(z_end / dz - 1e-9)), frames ? ", frames" : "", axis ? ", axis lineouts" : "");
+    std::fprintf(f, "  output: dir '%s', every %d steps (%ld steps to z_end)%s\n", dir.c_str(), every,   // read by the GUI
+                 long(std::ceil(z_end / dz - 1e-9)), frames ? ", frames" : "");
+    for (const auto& g : groups) {
+        std::string fl;
+        static const char* fn[7] = {"ex", "ey", "ez", "bx", "by", "bz", "ne"};
+        for (int k = 0; k < 7; ++k) if (g.fields >> k & 1) fl += std::string(fl.empty() ? "" : " ") + fn[k];
+        std::fprintf(f, "    %-10s fields every %d (%s), beams every %d (%s%s%s), %s%s, xi_stride %d, particle_stride %d -> %s\n",
+                     g.name.empty() ? "output" : ("diag." + g.name).c_str(), g.every, fl.empty() ? "none" : fl.c_str(), g.beam_every,
+                     g.beams & 1 ? "bunch" : "", g.beams == 3 ? " " : "", g.beams & 2 ? "trapped" : (g.beams ? "" : "none"),
+                     g.native && g.openpmd ? "native + openPMD" : g.openpmd ? "openPMD" : "native", g.axis ? ", axis" : "",
+                     g.xi_stride, g.particle_stride, g.dir.c_str());
+    }
     if (freeze_bunch) std::fprintf(f, "  bunch frozen (numerics.freeze_bunch): not pushed, a rigid source\n");
     std::fprintf(f, "  self fields %s, zeta filter %s, transverse filter %s\n", self_fields ? "on" : "off", zeta_filter ? "on" : "off",
                  k_filter ? "on" : "off");

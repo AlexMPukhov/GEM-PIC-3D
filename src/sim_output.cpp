@@ -88,11 +88,11 @@ void Simulation::dump_particles(const std::string& file) {
           << d[6 * k + 4] << ' ' << d[6 * k + 5] << '\n';
 }
 
-// Frame for the GUI: E and B (and with plasma n_e/n0 of the streaming particles) in the planes y = 0 and x = 0
+// Frame for the GUI, and the native field files of an output group (comps: bits ex ey ez bx by bz ne): E and B (and with plasma n_e/n0 of the streaming particles) in the planes y = 0 and x = 0
 // through the axis. One header line (JSON), then float32 arrays: per component the plane y = 0 [nzeta][nx],
 // then the plane x = 0 [nzeta][ny]. Free-hand y: components on half-nodes are averaged to y = 0 in the plane
 // y = 0 and given at the half-nodes in the plane x = 0 (y_half in the header).
-void Simulation::write_frame(const std::string& file) {
+void Simulation::write_frame(const std::string& file, int comps) {
     const int nx = cfg.nx, ny = cfg.ny, ncomp = 6;
     const int i0 = ((int(std::lround(-X0 / dx)) % nx) + nx) % nx;
     const int j0 = yf ? ((int(std::lround(-Y0 / dy)) % ny) + ny) % ny : ny / 2;
@@ -126,17 +126,25 @@ void Simulation::write_frame(const std::string& file) {
         yn[j] = yf ? (((j - j0) % ny + ny + ny / 2) % ny - ny / 2) * dy * um : cfg.ynode[j] * um;
         yh[j] = yf ? yn[j] : 0.5 * (cfg.ynode[j] + cfg.ynode[j + 1]) * um;
     }
-    const bool dens = cfg.plasma_on;
+    const bool dens = cfg.plasma_on && (comps >> 6 & 1);
+    std::string cl, hl;
+    const char* cn[6] = {"ex", "ey", "ez", "bx", "by", "bz"};
+    for (int c = 0; c < ncomp; ++c)
+        if (comps >> c & 1) {
+            cl += std::string(cl.empty() ? "" : ", ") + "\"" + cn[c] + "\"";
+            hl += std::string(hl.empty() ? "" : ", ") + (!yf && is_half(c) ? "true" : "false");
+        }
+    if (dens) { cl += std::string(cl.empty() ? "" : ", ") + "\"ne\""; hl += std::string(hl.empty() ? "" : ", ") + "false"; }
     h += ", \"zeta_um\": " + arr(zeta) + ", \"x_um\": " + arr(xs) + ", \"y_um\": " + arr(yn) + ", \"y_half_um\": " + arr(yh) +
-         ", \"comps\": [\"ex\", \"ey\", \"ez\", \"bx\", \"by\", \"bz\"" + (dens ? ", \"ne\"" : "") + "]" +
-         ", \"half\": [false, " + (yf ? "false" : "true") + ", false, " + (yf ? "false" : "true") + ", false, " + (yf ? "false" : "true") +
-         (dens ? ", false" : "") + "], \"n0\": " + std::to_string(cfg.n0) + ", \"lambda0_um\": " + std::to_string(cfg.lambda0 * 1e6) + "}\n";
+         ", \"comps\": [" + cl + "], \"half\": [" + hl + "], \"n0\": " + std::to_string(cfg.n0) +
+         ", \"lambda0_um\": " + std::to_string(cfg.lambda0 * 1e6) + "}\n";
     const std::string tmp = file + ".tmp";
     FILE* f = std::fopen(tmp.c_str(), "wb");
     if (!f) throw std::runtime_error("cannot write " + tmp);
     std::fwrite(h.data(), 1, h.size(), f);
     std::vector<float> buf(size_t(N) * std::max(nx, ny));
     for (int c = 0; c < ncomp; ++c) {
+        if (!(comps >> c & 1)) continue;
         for (int n = 0; n < N; ++n) for (int i = 0; i < nx; ++i) buf[size_t(n) * nx + i] = A[(size_t(n) * ncomp + c) * (nx + ny) + i];
         std::fwrite(buf.data(), sizeof(float), size_t(N) * nx, f);
         for (int n = 0; n < N; ++n) for (int j = 0; j < ny; ++j) buf[size_t(n) * ny + j] = A[(size_t(n) * ncomp + c) * (nx + ny) + nx + j];
@@ -158,35 +166,88 @@ void Simulation::write_frame(const std::string& file) {
     std::rename(tmp.c_str(), file.c_str());
 }
 
-// axis.txt (output.axis): one line per output step: z [mm], then E_z and E_x - B_y (the transverse force on an
-// electron moving at c along z, per -e) on the axis x = 0, y = 0 at every slice, in code units m c omega0 / e.
-// The first line (#) holds zeta [um] of the slices.
-void Simulation::write_axis(const std::string& file, bool first) {
+// axis_NNNNNN.txt (axis = true in an output group): one line per slice on the axis x = 0, y = 0: zeta [um], E_z,
+// E_x - B_y and E_y + B_x (the transverse force on an electron moving at c along z, per -e), in code units
+// m c omega0 / e, and with plasma n_e/n0. Free-hand y: E_y, B_x are averaged from the half-nodes to y = 0.
+void Simulation::write_axis(const std::string& file) {
     const int nx = cfg.nx, ny = cfg.ny;
     const int i0 = ((int(std::lround(-X0 / dx)) % nx) + nx) % nx;
     const int j0 = yf ? ((int(std::lround(-Y0 / dy)) % ny) + ny) % ny : ny / 2;
     const std::vector<float> Fh = cfg.self_fields ? F.host() : std::vector<float>(F.size(), 0.0f);
     const long fpl = long(ns + 2) * nk;
-    std::vector<double> mine(size_t(ns) * 2);
+    std::vector<double> mine(size_t(ns) * 3);
     for (int l = 0; l < ns; ++l) {
-        const long k = long(l) * nk + long(j0) * nx + i0;
-        // free-hand y: B_y (comp 4) is on the nodes like E_z and E_x
-        mine[2 * l] = Fh[2 * fpl + k];
-        mine[2 * l + 1] = Fh[0 * fpl + k] - Fh[4 * fpl + k];
+        const long k = long(l) * nk + long(j0) * nx + i0, kh = yf ? k : k - nx;   // free-hand y: half-node below
+        auto hv = [&](int comp) { return yf ? double(Fh[comp * fpl + k]) : 0.5 * (Fh[comp * fpl + k] + Fh[comp * fpl + kh]); };
+        mine[3 * l] = Fh[2 * fpl + k];
+        mine[3 * l + 1] = Fh[0 * fpl + k] - Fh[4 * fpl + k];      // B_y is on the nodes like E_x
+        mine[3 * l + 2] = hv(1) + hv(3);
     }
     std::vector<char> all = comm.gather_bytes(mine.data(), mine.size() * sizeof(double));
     if (comm.rank != 0) return;
     const double* A = reinterpret_cast<const double*>(all.data());
-    FILE* f = std::fopen(file.c_str(), first ? "w" : "a");
+    std::vector<double> rl;
+    if (cfg.plasma_on) rl = rho_lines.host();
+    const int L = nx + ny;
+    FILE* f = std::fopen(file.c_str(), "w");
     if (!f) throw std::runtime_error("cannot write " + file);
-    if (first) {
-        std::fprintf(f, "# GEM-PIC-3D axis lineouts: z_mm, then Ez(zeta_n) for n = 0..%d, then (Ex - By)(zeta_n); code units\n# zeta_um", N - 1);
-        for (int n = 0; n < N; ++n) std::fprintf(f, " %.6g", cfg.zeta[n] * cfg.Lu * 1e6);
+    std::fprintf(f, "# GEM-PIC-3D axis x = 0, y = 0, step %ld, z = %.9g mm; fields in m c omega0 / e\n", istep, s * cfg.Lu * 1e3);
+    std::fprintf(f, "# zeta_um Ez Ex-By Ey+Bx%s\n", cfg.plasma_on ? " ne/n0" : "");
+    for (int n = 0; n < N; ++n) {
+        std::fprintf(f, "%.10g %.10e %.10e %.10e", cfg.zeta[n] * cfg.Lu * 1e6, A[3 * n], A[3 * n + 1], A[3 * n + 2]);
+        if (cfg.plasma_on) {
+            const double lo = n > 0 ? rl[size_t(n - 1) * L + i0] : 0, hi = n < N - 1 ? rl[size_t(n) * L + i0] : 0;
+            std::fprintf(f, " %.10e", -0.5 * (lo + hi) / cfg.n0);
+        }
         std::fprintf(f, "\n");
     }
-    std::fprintf(f, "%.9g", s * cfg.Lu * 1e3);
-    for (int n = 0; n < N; ++n) std::fprintf(f, " %.7e", A[2 * n]);
-    for (int n = 0; n < N; ++n) std::fprintf(f, " %.7e", A[2 * n + 1]);
-    std::fprintf(f, "\n");
     std::fclose(f);
+}
+
+// beam_<species>_NNNNNN.txt (native beam output of a group): x, y, zeta [um], p [m c], weight in real particles
+void Simulation::write_beams_native(const Config::OutGroup& g) {
+    std::vector<double> mine;
+    for (const auto& p : host_particles()) {
+        if (p.alive != 1) continue;
+        mine.push_back(p.sp == SP_BUNCH ? 0 : 1);
+        for (double v : {p.x + X0, p.y + Y0, p.zeta, p.px, p.py, p.pz, p.w}) mine.push_back(v);
+    }
+    std::vector<char> all = comm.gather_bytes(mine.data(), mine.size() * sizeof(double));
+    if (comm.rank != 0) return;
+    const double* A = reinterpret_cast<const double*>(all.data());
+    const size_t n = all.size() / sizeof(double) / 8;
+    const double um = cfg.Lu * 1e6, W = cfg.nc * std::pow(cfg.Lu, 3);
+    const char* nm[2] = {"bunch", "trapped"};
+    for (int sp = 0; sp < 2; ++sp) {
+        if (!(g.beams >> sp & 1)) continue;
+        if (sp == 1 && !cfg.plasma_on) continue;
+        char fn[96];
+        std::snprintf(fn, sizeof fn, "/beam_%s_%06ld.txt", nm[sp], istep);
+        FILE* f = std::fopen((g.dir + fn).c_str(), "w");
+        if (!f) throw std::runtime_error("cannot write " + g.dir + fn);
+        std::fprintf(f, "# x_um y_um zeta_um px py pz w(real particles)  step %ld z = %.9g mm\n", istep, s * cfg.Lu * 1e3);
+        long k = 0;
+        for (size_t i = 0; i < n; ++i) {
+            const double* q = A + 8 * i;
+            if (int(q[0]) != sp) continue;
+            if (k++ % g.particle_stride) continue;
+            std::fprintf(f, "%.9g %.9g %.9g %.9e %.9e %.9e %.6e\n", q[1] * um, q[2] * um, q[3] * um, q[4], q[5], q[6], q[7] * W);
+        }
+        std::fclose(f);
+    }
+}
+
+// the outputs of all groups due at this step (fields every `every`, beams every `beam_every`)
+void Simulation::write_outputs(bool) {
+    for (const auto& g : cfg.groups) {
+        const bool fd = g.every > 0 && istep % g.every == 0, bd = g.beam_every > 0 && istep % g.beam_every == 0 && g.beams;
+        if (!fd && !bd) continue;
+        if (comm.rank == 0) std::filesystem::create_directories(g.dir);
+        comm.barrier();
+        char fn[64];
+        if (g.openpmd && ((fd && g.fields) || bd)) write_openpmd(g, fd && g.fields, bd);
+        if (g.native && fd && g.fields) { std::snprintf(fn, sizeof fn, "/fields_%06ld.bin", istep); write_frame(g.dir + fn, g.fields); }
+        if (g.native && bd) write_beams_native(g);
+        if (g.axis && fd) { std::snprintf(fn, sizeof fn, "/axis_%06ld.txt", istep); write_axis(g.dir + fn); }
+    }
 }
