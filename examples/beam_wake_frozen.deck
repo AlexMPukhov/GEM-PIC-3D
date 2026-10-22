@@ -4,7 +4,7 @@
 #   bunch:  gamma = 1000, sigma_r = sigma_z = 5 / k0 (k_p sigma = 0.5), n_b = 0.01 n0 (Q = 1.4176 pC)
 #   numerics.freeze_bunch = true: the bunch is not pushed, an exactly rigid source, so the true solution is
 #   steady in s. Run it also with freeze_bunch=false for comparison (command line below).
-# Output: diag/axis.txt, one line per step: z, E_z(zeta) and (E_x - B_y)(zeta) on the axis; frames every 25 steps.
+# Output: wake_frozen/axis_NNNNNN.txt every step: zeta, E_z, E_x - B_y, E_y + B_x, n_e/n0 on the axis.
 #   build/gempic3d examples/beam_wake_frozen.deck                                        # frozen bunch
 #   build/gempic3d examples/beam_wake_frozen.deck numerics.freeze_bunch=false output.dir=wake_moving
 
@@ -49,6 +49,6 @@ output {
   dir       = wake_frozen
   every     = 1
   axis      = true
-  frames    = false
+  fields    = none          # only the axis lineouts, no field files
   particles = false
 }

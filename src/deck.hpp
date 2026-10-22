@@ -25,6 +25,7 @@ public:
     std::vector<double> list(const std::string& b, const std::string& k, Kind kind) const;
     bool flag(const std::string& b, const std::string& k, bool def) const;
     void check_unused() const;                                                  // unknown keys are errors
+    std::string text() const;                                                   // the deck after overrides
     std::string file = "(deck)";
 private:
     std::string where(const std::string& b, const std::string& k) const;
