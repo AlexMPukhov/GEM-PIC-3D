@@ -65,23 +65,7 @@ struct Config {
     int every = 10;
     bool dump_particles = true;
     bool frames = false;                               // output.frames: frame_NNNNN.bin every output step (GUI)
-    // output groups, as in QUARZ: [0] the main output (block output), then the diagnostics named in diag.names
-    // (blocks diag.<name>), each with its own period, selection of fields and beams, and format
-    struct OutGroup {
-        std::string name, dir;               // name "" = main output; dir: <output.dir> or <output.dir>/<name>
-        int every = 0, beam_every = 0;       // field and particle output periods (steps; 0 = never)
-        int fields = 127;                    // bits: ex ey ez bx by bz ne
-        int beams = 3;                       // bits: bunch, trapped
-        bool axis = false, native = true, openpmd = false;
-        int xi_stride = 1, particle_stride = 1;
-        std::string openpmd_file = "openpmd/data_%06T";
-        bool openpmd_uniform = true, openpmd_native = false, hdf5_single = true;
-        int hdf5_compression = 0;
-        double openpmd_dy = 0, openpmd_dzeta = 0;    // spacing of the uniform output grid (0: smallest step)
-    };
-    std::vector<OutGroup> groups;
-    bool openpmd = false;                              // some group writes openPMD
-    std::string deck_text;
+    bool axis = false;                                 // output.axis: axis.txt, E_z and E_x - B_y on the axis
     bool freeze_bunch = false;                         // numerics.freeze_bunch: the bunch is not pushed (rigid source)
 
     static Config from_deck(const Deck& d);
@@ -137,14 +121,8 @@ public:
     bool finished() const { return s >= cfg.z_end - 1e-9 || stop_; }
     void diagnostics(FILE* f, bool header);        // collective; f is used on rank 0 only
     void dump_particles(const std::string& file);  // collective
-    // collective: fields in the planes y = 0 and x = 0 (GUI frames, and the native field files of a group)
-    void write_frame(const std::string& file, int comps = 127);
-    void write_axis(const std::string& file);       // collective: axis lineouts (axis_NNNNNN.txt)
-    // collective: one openPMD file of iteration istep for the group g, with its fields and/or beams
-    void write_openpmd(const Config::OutGroup& g, bool fields, bool beams);
-    void write_beams_native(const Config::OutGroup& g);   // collective: beam_<species>_NNNNNN.txt
-    void write_outputs(bool start);                // collective: the groups due at this step
-    Buf<float> rho_full;                     // plasma charge density of every half-cell (openPMD n_e), [N-1][nk]
+    void write_frame(const std::string& file);     // collective: fields in the planes y = 0 and x = 0 (GUI)
+    void write_axis(const std::string& file, bool first);   // collective: axis lineouts (output.axis)
 
     // fields of level s1 (march with D = dz/2), or E_z, B_z, L of the stored R (D = 0)
     void solve_fields(double D);

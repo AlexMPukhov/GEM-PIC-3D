@@ -4,8 +4,7 @@
 # make EMU=1           GPU code paths on the CPU (src/emu: CUDA runtime and cuFFT emulated, device memory
 #                      protected outside kernels); combine with MPI=1
 # make FFTW=1          CPU build with FFTW 3 instead of the own FFT (-lfftw3 -lfftw3_omp)
-# make HDF5=1          openPMD output (output.format = openpmd) with HDF5 (pkg-config hdf5); combine with the others
-SRC = src/deck.cpp src/grid.cpp src/sim.cpp src/comm.cpp src/openpmd.cpp
+SRC = src/deck.cpp src/grid.cpp src/sim.cpp src/comm.cpp
 HDR = $(wildcard src/*.hpp src/emu/*.h)
 BUILD ?= build
 ifeq ($(CUDA),1)
@@ -35,13 +34,6 @@ else
   endif
 endif
 
-ifeq ($(HDF5),1)
-  HDF5_CFLAGS ?= $(shell pkg-config --cflags hdf5 2>/dev/null || echo -I/usr/include/hdf5/serial)
-  HDF5_LIBS ?= $(shell pkg-config --libs hdf5 2>/dev/null || echo -L/usr/lib/x86_64-linux-gnu/hdf5/serial -lhdf5)
-  CXXFLAGS += -DGEMPIC_HDF5 $(HDF5_CFLAGS)
-  LDLIBS += $(HDF5_LIBS)
-endif
-
 all: $(BUILD)/gempic3d $(BUILD)/tests
 $(BUILD)/gempic3d: $(SRC) src/main.cpp $(HDR)
 	@mkdir -p $(BUILD)
@@ -56,5 +48,5 @@ emu-selftest: tests/emu_selftest.cpp $(HDR)
 	$(CXX) $(CXXFLAGS) -Isrc -o $(BUILD)/emu_selftest tests/emu_selftest.cpp
 	$(BUILD)/emu_selftest
 clean:
-	rm -rf build build-mpi build-gpu build-emu build-fftw build-h5
+	rm -rf build build-mpi build-gpu build-emu build-fftw
 .PHONY: all test emu-selftest clean
