@@ -353,7 +353,7 @@ diag.light {
 | streaming in vacuum: a fast electron is trapped at ζ0 − (1 − v_z) Δ/v_z and moves on in the beam list; a slow one returns to streaming | 1e-9 |
 | GUI (`tests/gui.sh`): frames, cuts, 2 ranks = 1 rank, plasma frames | pass |
 | output groups and openPMD (`tests/openpmd.sh`): periods and selections of two groups, openPMD attributes and input deck, particles = native beam file, fields = native field file and axis file on a uniform grid | pass; 1.5e-7; exact; 1.5e-11 |
-| all of the above in the GPU emulator (`make EMU=1 test`, `tests/mpi.sh build-emu-mpi/gempic3d`); FFTW build | pass; pass (before the output groups; to be rerun) |
+| all of the above except the 3D beam wake in the GPU emulator (`make EMU=1 test`); the 3D beam wake there on a reduced grid (`tests/emu_wake.cpp`: 32 × 32 modes, Δζ = 1, 10 steps, Fourier and free-hand y) against the CPU build; `tests/mpi.sh build-emu-mpi/gempic3d`; FFTW build | pass; E_z on the axis identical bit for bit; pass, pass (both before the output groups; to be rerun) |
 
 With the default grids (Fourier y, uniform ζ) the code reproduces the previous version (commit cf3ee50)
 up to rounding, except in the sponge, whose bound field now includes the factor (1 + β) and the 1/γ²
