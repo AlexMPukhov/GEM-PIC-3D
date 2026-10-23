@@ -24,7 +24,7 @@ void test_plasma_wake_1d(bool extrap) {
     std::vector<double> ez(N);
     for (int n = 0; n < N; ++n) {
         double v = 0;
-        for (int i = 0; i < sim.nk; ++i) v += F[(size_t(2) * (sim.ns + 2) + n) * sim.nk + i] / sim.nk;
+        for (int i = 0; i < sim.nk; ++i) v += field(F, sim, 2, n, i) / sim.nk;
         ez[n] = v;
         if (c.zeta[n] < 200) emax = std::max(emax, std::fabs(v));
     }
@@ -41,19 +41,20 @@ void test_plasma_wake_1d(bool extrap) {
     for (int n = N - 2; n >= 0; --n) {
         if (c.zeta[n] > 200) continue;
         if ((ez[n] > 0) != (ez[n + 1] > 0)) {
-            const double zc = c.zeta[n] + (c.zeta[n + 1] - c.zeta[n]) * ez[n] / (ez[n] - ez[n + 1]);
-            if (z1 < 0) z1 = zc;
-            z2 = zc; ++cnt;
+            const double zx = c.zeta[n] + (c.zeta[n + 1] - c.zeta[n]) * ez[n] / (ez[n] - ez[n + 1]);
+            if (z1 < 0) z1 = zx;
+            z2 = zx; ++cnt;
         }
     }
     const double lam = 2 * (z1 - z2) / (cnt - 1);
     const std::string tag = extrap ? "plasma: 1D laser wake: " : "plasma: 1D laser wake (predictor = previous): ";
-    close((tag + "amplitude against linear theory").c_str(), emax, rmax, extrap ? 0.02 : 0.03);
-    close((tag + "plasma wavelength 2 pi / k_p").c_str(), lam, 2 * M_PI / kp, 0.005);
+    close(tag + "amplitude against linear theory", emax, rmax, extrap ? 0.02 : 0.03);
+    close(tag + "plasma wavelength 2 pi / k_p", lam, 2 * M_PI / kp, 0.005);
 }
 
 // 11. Plasma: 3D linear wake of a narrow electron bunch (gamma = 1000, k_p sigma_r = k_p sigma_z = 0.5,
-//     n_b = 0.01 n0), rigid (numerics.freeze_bunch), on the axis after 30 steps (the start-up transient decays over the first tens of steps).
+//     n_b = 0.01 n0), rigid (numerics.freeze_bunch), on the axis after 30 steps (the start-up transient decays
+//     over the first tens of steps).
 //     Reference: the linear theory of the discrete scheme. The plasma current is deposited and the fields are
 //     gathered with TSC, so a transverse mode k sees the plasma frequency k_p S(k), S = sinc^3(k_x dx/2)
 //     sinc^3(k_y dy/2); the bunch is deposited with S(k) too. Per mode
@@ -61,7 +62,10 @@ void test_plasma_wake_1d(bool extrap) {
 //     summed over the modes of the box (Nyquist modes excluded). With S = 1 this is the continuum theory, from
 //     which the scheme deviates by about 9 % (the wake modes oscillate ~1.4 % too slowly at sigma/dx = 2.7).
 //     The free-hand y run is compared with the Fourier y run.
-std::vector<double> beam_wake_axis(bool freehand, Config& c, double& Ne, Simulation*& keep) {
+struct BeamWake { Config c; double Ne, dx, dy; std::vector<double> ez; };   // E_z on the axis per slice
+static BeamWake beam_wake_axis(bool freehand) {
+    BeamWake w;
+    Config& c = w.c;
     c = Config::base_units(10e-6);
     const double sig = 5, sz = 5, Lw = 150, h = 0.5;
     c.nx = 64; c.Lx = 120;
@@ -70,27 +74,27 @@ std::vector<double> beam_wake_axis(bool freehand, Config& c, double& Ne, Simulat
     c.sponge = c.sponge_y = 0; c.move_x = c.move_y = false; c.k_filter = false;
     c.plasma_on = true; c.n0 = 0.01; c.ppc_x = 1; c.ppc_y = 1;
     const double nb = 0.01 * c.n0;
-    Ne = nb * std::pow(2 * M_PI, 1.5) * sig * sig * sz;                        // electrons (code units)
+    w.Ne = nb * std::pow(2 * M_PI, 1.5) * sig * sig * sz;                        // electrons (code units)
     c.gamma = 1000; c.sigx = c.sigy = sig; c.sigz = sz; c.nmacro = 200000; c.zeta_center = 120;
-    c.charge = Ne * c.nc * std::pow(c.Lu, 3) * 1.602176634e-19;
+    c.charge = w.Ne * c.nc * std::pow(c.Lu, 3) * 1.602176634e-19;
     c.dz = 10; c.dz_push = 10; c.freeze_bunch = true;
-    keep = new Simulation(c, comm);
-    Simulation& sim = *keep;
+    Simulation sim(c, comm);
     sim.init();
     for (int k = 0; k < 30; ++k) sim.step();
     const std::vector<float> F = sim.F.host();
     const int ic = c.nx / 2, jc = c.ny / 2;                                      // the axis: x = 0, y = 0
-    std::vector<double> ez(c.nzeta);
-    for (int n = 0; n < c.nzeta; ++n) ez[n] = F[(size_t(2) * (sim.ns + 2) + n) * sim.nk + size_t(jc) * c.nx + ic];
-    return ez;
+    w.ez.resize(c.nzeta);
+    for (int n = 0; n < c.nzeta; ++n) w.ez[n] = field(F, sim, 2, n, size_t(jc) * c.nx + ic);
+    w.dx = sim.dx; w.dy = sim.dy;
+    return w;
 }
 void test_plasma_wake_beam() {
-    Config c, cf; double Ne, Nf; Simulation *s1 = nullptr, *s2 = nullptr;
-    const std::vector<double> ez = beam_wake_axis(false, c, Ne, s1);
-    const std::vector<double> ef = beam_wake_axis(true, cf, Nf, s2);
-    const double kp = std::sqrt(c.n0), sig = c.sigx, sz = c.sigz, dx = s1->dx, dy = s1->dy, Ly = c.Ly;
-    delete s1; delete s2;
-    const double lam0 = Ne / (std::sqrt(2 * M_PI) * sz);
+    const BeamWake fy = beam_wake_axis(false);
+    const std::vector<double> ef = beam_wake_axis(true).ez;
+    const Config& c = fy.c;
+    const std::vector<double>& ez = fy.ez;
+    const double kp = std::sqrt(c.n0), sig = c.sigx, sz = c.sigz, dx = fy.dx, dy = fy.dy, Ly = c.Ly;
+    const double lam0 = fy.Ne / (std::sqrt(2 * M_PI) * sz);
     auto sinc = [](double x) { return x == 0 ? 1.0 : std::sin(x) / x; };
     // per mode: A(k) and the cosine/sine moments of the bunch profile at the frequency K = k_p S(k)
     std::vector<double> zs;
@@ -125,8 +129,7 @@ void test_plasma_wake_beam() {
         n0 += (ez[n] - E0[n]) * (ez[n] - E0[n]);
         nf += (ef[n] - ez[n]) * (ef[n] - ez[n]); df += ez[n] * ez[n];
     }
-    std::printf("%-66s INFO  value %.6g  (scheme vs continuum theory)\n", "plasma: 3D beam wake on the axis: rms deviation from continuum",
-                std::sqrt(n0 / den));
+    info("plasma: 3D beam wake on the axis: rms deviation from continuum", std::sqrt(n0 / den), "scheme vs continuum theory");
     check(std::sqrt(num / den) < 0.03, "plasma: 3D beam wake on the axis = linear theory of the scheme (rms)", std::sqrt(num / den), 0, 0.03);
     check(std::sqrt(nf / df) < 0.03, "plasma: 3D beam wake on the axis, free-hand y = Fourier y (rms)", std::sqrt(nf / df), 0, 0.03);
 }
@@ -138,13 +141,14 @@ void test_smoothing_divergence() {
     c.nx = 8; c.Lx = 20; c.y_table({0, 5, 15}, {1, 1, 3}, 20); c.zeta_uniform(8, 7);
     c.plasma_on = true; c.n0 = 0.01; c.k_filter = false; c.sponge = c.sponge_y = 0; c.move_x = false;
     c.nmacro = 0; c.dz = 10;
+    const double a = 2.0;                                       // smoothing length
     std::vector<cpx> J[2];
     std::mt19937 r(5); std::uniform_real_distribution<double> U(-1, 1);
     const int nk = c.nx * c.ny;
     std::vector<double> src(3 * nk);
     for (auto& v : src) v = U(r);
     for (int k = 0; k < 2; ++k) {
-        Config ck = c; ck.smooth_length = k ? 2.0 : 0.0;
+        Config ck = c; ck.smooth_length = k ? a : 0.0;
         Simulation sim(ck, comm);
         sim.jsr.upload(src);
         sim.stream_spectra();
@@ -156,17 +160,15 @@ void test_smoothing_divergence() {
     std::vector<double> ia(ny), id(ny);
     for (int j = 0; j < ny; ++j) { id[j] = 1 / sim.hDel[j]; ia[j] = 1 / sim.hA[j]; }
     double res = 0, scale = 0;
-    const double a2 = 4.0;
-    for (int ix_ = 0; ix_ < nx; ++ix_) {
+    for (int i = 0; i < nx; ++i) {
         auto divv = [&](const std::vector<cpx>& A, int j) {   // node j: i k_x J_x + (J_y(j) - J_y(j-1)) / A_j
-            const cpx jx = A[size_t(j) * nx + ix_], ju = A[nk + size_t(j) * nx + ix_], jd = A[nk + size_t(j - 1) * nx + ix_];
-            return std::complex<double>(-kx[ix_] * jx.im, kx[ix_] * jx.re) + std::complex<double>(ju.re - jd.re, ju.im - jd.im) * ia[j];
+            return cd(0, kx[i]) * zc(A[size_t(j) * nx + i]) + (zc(A[nk + size_t(j) * nx + i]) - zc(A[nk + size_t(j - 1) * nx + i])) * ia[j];
         };
-        std::vector<std::complex<double>> d0(ny + 1, 0.0), da(ny + 1, 0.0);
+        std::vector<cd> d0(ny + 1, 0.0), da(ny + 1, 0.0);
         for (int j = 1; j < ny; ++j) { d0[j] = divv(J[0], j); da[j] = divv(J[1], j); }
         for (int j = 1; j < ny; ++j) {
-            const std::complex<double> lap = ((da[j + 1] - da[j]) * id[j] - (da[j] - da[j - 1]) * id[j - 1]) * ia[j];
-            const std::complex<double> Nd = da[j] + a2 * (kx[ix_] * kx[ix_] * da[j] - lap);
+            const cd lap = ((da[j + 1] - da[j]) * id[j] - (da[j] - da[j - 1]) * id[j - 1]) * ia[j];
+            const cd Nd = da[j] + a * a * (kx[i] * kx[i] * da[j] - lap);
             res = std::max(res, std::abs(Nd - d0[j])); scale = std::max(scale, std::abs(d0[j]));
         }
     }
@@ -189,16 +191,17 @@ void test_streaming_kinematics() {
     sim.set_particles({sl});
     sim.step();
     const double vf = 10 / std::sqrt(101.0), vs = 1 / std::sqrt(2.0);
+    const double shift_f = (1 - vf) * c.dz / vf, shift_s = (1 - vs) * c.dz / vs;   // zeta lost per step
     std::vector<Particle> b = sim.host_particles();
     const bool ok1 = b.size() == 1 && b[0].sp == SP_TRAPPED;
-    const double zt = ok1 ? b[0].zeta : 0, zref = 150.3 - (1 - vf) * 50 / vf;
+    const double zt = ok1 ? b[0].zeta : 0, zref = 150.3 - shift_f;
     check(ok1 && std::fabs(zt - zref) < 1e-9, "streaming: fast electron trapped at zeta0 - (1 - v_z) dz / v_z", zt, zref, 1e-9);
     const bool ok2 = sim.joining_.size() == 1;
-    const double zs = ok2 ? sim.joining_[0].zeta : 0, zsref = 120.7 - (1 - vs) * 50 / vs;
+    const double zs = ok2 ? sim.joining_[0].zeta : 0, zsref = 120.7 - shift_s;
     check(ok2 && std::fabs(zs - zsref) < 1e-9, "streaming: slow electron leaves the beam list and keeps streaming", zs, zsref, 1e-9);
     sim.step();
     b = sim.host_particles();
     const double zt2 = b.empty() ? 0 : b[0].zeta;
-    check(!b.empty() && std::fabs(zt2 - (zref - (1 - vf) * 50 / vf)) < 1e-6, "streaming: trapped electron moves on in the beam list", zt2,
-          zref - (1 - vf) * 50 / vf, 1e-6);
+    check(!b.empty() && std::fabs(zt2 - (zref - shift_f)) < 1e-6, "streaming: trapped electron moves on in the beam list", zt2,
+          zref - shift_f, 1e-6);
 }

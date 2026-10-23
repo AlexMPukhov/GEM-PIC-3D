@@ -4,19 +4,32 @@
 #include <algorithm>
 #include <cmath>
 #include <complex>
+#include <cstdarg>
 #include <cstdio>
 #include <random>
+#include <string>
 #include "sim.hpp"
+
+using cd = std::complex<double>;
 
 extern int failures;
 extern Comm comm;
-inline void check(bool ok, const char* name, double val, double ref, double tol) {
-    std::printf("%-66s %s  value %.6g  reference %.6g  tol %.2g\n", name, ok ? "PASS" : "FAIL", val, ref, tol);
+inline void check(bool ok, const std::string& name, double val, double ref, double tol) {
+    std::printf("%-66s %s  value %.6g  reference %.6g  tol %.2g\n", name.c_str(), ok ? "PASS" : "FAIL", val, ref, tol);
     std::fflush(stdout);
     if (!ok) ++failures;
 }
-inline void close(const char* name, double val, double ref, double rtol) {
+inline void close(const std::string& name, double val, double ref, double rtol) {
     check(std::fabs(val - ref) <= rtol * std::fabs(ref), name, val, ref, rtol);
+}
+inline void info(const std::string& name, double val, const char* note) {   // reported, not checked
+    std::printf("%-66s INFO  value %.6g  (%s)\n", name.c_str(), val, note);
+    std::fflush(stdout);
+}
+inline std::string strf(const char* fmt, ...) {
+    char buf[160];
+    va_list ap; va_start(ap, fmt); std::vsnprintf(buf, sizeof buf, fmt, ap); va_end(ap);
+    return buf;
 }
 
 // default grids: Fourier modes in x and y, nz uniform slices over the window Lw
@@ -27,6 +40,12 @@ inline Config base(int nx, int ny, int nz, double Lx, double Ly, double Lw) {
     c.zeta_uniform(nz, Lw);
     c.sponge = c.sponge_y = 0; c.move_x = false;
     return c;
+}
+inline cd zc(cpx v) { return {v.re, v.im}; }
+inline double gamma_of(const Particle& p) { return std::sqrt(1 + p.px * p.px + p.py * p.py + p.pz * p.pz); }
+// host copy of F: component comp (Ex Ey Ez Bx By Bz), slice n, plane index i = j*nx + ix
+inline double field(const std::vector<float>& F, const Simulation& sim, int comp, int n, size_t i) {
+    return F[(size_t(comp) * (sim.ns + 2) + n) * sim.nk + i];
 }
 inline double mean_pz(Simulation& sim) {
     double s = 0; long n = 0;
@@ -39,7 +58,9 @@ inline int nearest(const std::vector<double>& v, double x) {
     return k;
 }
 
-void test_fft(int nx, int ny);
+void test_fft_pair();
+void test_fft_sizes();
+void test_fft_batched(int nx, int ny);
 void test_grids();
 void test_dispersion(const std::string& kind);
 double test_diffraction(const std::string& kind, double ref_fd);

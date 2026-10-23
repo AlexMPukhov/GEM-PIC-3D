@@ -26,7 +26,7 @@ static std::vector<double> wake(bool freehand) {
     const std::vector<float> F = sim.F.host();
     const int ic = c.nx / 2, jc = c.ny / 2;
     std::vector<double> ez(c.nzeta);
-    for (int n = 0; n < c.nzeta; ++n) ez[n] = F[(size_t(2) * (sim.ns + 2) + n) * sim.nk + size_t(jc) * c.nx + ic];
+    for (int n = 0; n < c.nzeta; ++n) ez[n] = field(F, sim, 2, n, size_t(jc) * c.nx + ic);
     return ez;
 }
 int main(int argc, char** argv) {
