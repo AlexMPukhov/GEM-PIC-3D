@@ -33,7 +33,7 @@ Deck Deck::read(const std::string& file) {
             if (br == std::string::npos) throw err("expected 'block {'");
             block = trim(line.substr(0, br));
             if (d.blocks_.count(block)) {
-                static const std::set<std::string> rep = {"laser", "ion", "bunch", "undulator", "quadrupole", "plasma_lens", "solenoid"};
+                static const std::set<std::string> rep = {"laser", "ion", "bunch", "undulator", "quadrupole", "plasma_lens", "solenoid", "chicane"};
                 if (!rep.count(block)) throw err("block '" + block + "' given twice");
                 int k = 2;
                 while (d.blocks_.count(block + std::to_string(k))) ++k;

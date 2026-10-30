@@ -139,9 +139,27 @@ Config Config::from_deck(const Deck& d) {
             GridLaser g;
             g.a0 = d.num(b, "a0", Kind::None);
             g.kL = c.lambda0 / d.num(b, "wavelength", Kind::Length, c.lambda0);
-            g.waist = L(b, "waist");
-            g.tau = d.num(b, "tau_fwhm", Kind::Time) / c.Tu;
-            g.zeta_c = L(b, "zeta_center");
+            if (d.has(b, "profile_function")) {
+                if (d.has(b, "waist") || d.has(b, "z_focus")) throw std::runtime_error(b + ": profile_function replaces waist and z_focus");
+                g.profile = d.expr(b, "profile_function", {"r"});
+            } else g.waist = L(b, "waist");
+            if (d.has(b, "envelope_function")) {
+                if (d.has(b, "tau_fwhm")) throw std::runtime_error(b + ": envelope_function replaces tau_fwhm");
+                g.envelope = d.expr(b, "envelope_function", {"zeta"});
+                if (d.has(b, "zeta_center")) g.zeta_c = L(b, "zeta_center");
+                else {                                         // the centre of the intensity
+                    double s0 = 0, s1 = 0;
+                    for (int k = 0; k <= 4000; ++k) {
+                        const double z = c.Lwin * k / 4000, e = g.envelope({z});
+                        s0 += e * e; s1 += z * e * e;
+                    }
+                    if (!(s0 > 0)) throw std::runtime_error(b + ".envelope_function is zero in the window");
+                    g.zeta_c = s1 / s0;
+                }
+            } else {
+                g.tau = d.num(b, "tau_fwhm", Kind::Time) / c.Tu;
+                g.zeta_c = L(b, "zeta_center");
+            }
             g.z_focus = Ld(b, "z_focus", 0.0);
             g.cep = d.num(b, "cep", Kind::Angle, 0.0);
             const std::string pol = d.str(b, "polarization", "linear");

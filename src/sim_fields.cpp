@@ -322,6 +322,7 @@ void Simulation::add_grid_lasers() {
     const int nx = cfg.nx, ny = cfg.ny;
     const size_t pl = size_t(nk);
     std::vector<cpx> pk(pl);
+    if (sp3.size() < 3 * pl) sp3.resize(3 * pl);        // scratch (allocated by setup_plasma only with plasma)
     for (const auto& Lz : cfg.glasers) {
         const double amp = Lz.a0 * Lz.kL;                       // field in m c omega0 / e
         const double zR = 0.5 * Lz.kL * Lz.waist * Lz.waist;
@@ -329,11 +330,13 @@ void Simulation::add_grid_lasers() {
         const std::complex<double> rot(std::cos(Lz.pol_angle), std::sin(Lz.pol_angle));
         for (int n = a; n < b; ++n) {
             const double d = cfg.zeta[n] - Lz.zeta_c;
-            const double env = std::exp(-2 * std::log(2.0) * d * d / (Lz.tau * Lz.tau));
-            if (env < 1e-12) continue;
+            const double env = Lz.envelope.empty() ? std::exp(-2 * std::log(2.0) * d * d / (Lz.tau * Lz.tau)) : Lz.envelope({cfg.zeta[n]});
+            if (std::fabs(env) < 1e-12) continue;
             const std::complex<double> car = std::exp(std::complex<double>(0, Lz.kL * d + Lz.cep));
             auto field = [&](double xp, double yp, double& ex, double& ey) {
-                const std::complex<double> E = amp * env * std::exp(-(xp * xp + yp * yp) / (Lz.waist * Lz.waist) / qb) / qb * car;
+                const std::complex<double> E = Lz.profile.empty()
+                    ? amp * env * std::exp(-(xp * xp + yp * yp) / (Lz.waist * Lz.waist) / qb) / qb * car
+                    : amp * env * Lz.profile({std::sqrt(xp * xp + yp * yp)}) * car;
                 if (Lz.circular) { ex = E.real(); ey = Lz.helicity * E.imag(); }
                 else { ex = E.real() * rot.real(); ey = E.real() * rot.imag(); }
             };

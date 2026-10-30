@@ -31,8 +31,10 @@ int main(int argc, char** argv) {
     test_bunches();
     test_undulator();
     test_magnets();
+    test_chicane();
     test_expr_parser();
     test_expr_profiles();
+    test_expr_functions();
     test_checkpoint();
     std::printf("%s: %d failure(s)\n", failures ? "FAILED" : "ALL PASSED", failures);
     comm.finalize();

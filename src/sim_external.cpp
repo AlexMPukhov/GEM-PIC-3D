@@ -67,6 +67,18 @@ void Config::parse_external(const Deck& d) {
             if (kind == 2 && m.ramp > 0) m.dsmax = std::min(m.dsmax, 0.25 * m.ramp);
             magnets.push_back(m);
         }
+    for (int k = 1;; ++k) {                           // thin chicanes
+        const std::string b = k == 1 ? "chicane" : "chicane" + std::to_string(k);
+        if (!d.has_block(b)) break;
+        Chicane ch{};
+        ch.z = L(b, "z");
+        ch.r56 = L(b, "r56");
+        ch.delay = Ld(b, "delay", 0.5 * std::fabs(ch.r56));
+        if (d.has(b, "energy") == d.has(b, "gamma")) throw std::runtime_error(b + ": give either energy or gamma (reference)");
+        ch.gamma_ref = d.has(b, "gamma") ? d.num(b, "gamma", Kind::None) : 1 + d.num(b, "energy", Kind::Energy) / 0.51099895e6;
+        if (!(ch.gamma_ref > 1)) throw std::runtime_error(b + ": the reference gamma must be > 1");
+        chicanes.push_back(ch);
+    }
 }
 
 // summary lines of the undulators and magnets
@@ -89,4 +101,47 @@ void Config::summary_external(FILE* f) const {
         std::fprintf(f, "  %s: z = %.4g ... %.4g mm, %s %.4g %s%s\n", nm[m.kind], m.z0 * Lu * 1e3, m.z1 * Lu * 1e3,
                      m.kind < 2 ? "gradient" : "field", m.kind < 2 ? m.g * Bunit / Lu : m.g * Bunit, m.kind < 2 ? "T/m" : "T",
                      m.kind == 1 && m.R < 1e299 ? (", radius " + std::to_string(m.R * um) + " um").c_str() : "");
+    for (const auto& ch : chicanes)
+        std::fprintf(f, "  chicane at z = %.4g mm: R56 = %.4g um, delay %.4g um, reference gamma %.6g\n", ch.z * Lu * 1e3,
+                     ch.r56 * um, ch.delay * um, ch.gamma_ref);
+}
+
+// Thin chicanes passed in the step s0 -> s1: every beam particle moves in zeta by r56 (gamma/gamma_ref - 1) - delay
+// (r56 > 0: more energy moves towards the head). The co-moving self-field of the beam moves with it: the co-moving
+// fields R of the old and the new positions are subtracted and added (vacuum at the chicane assumed), the radiation
+// in the window stays; E_z, B_z, L follow from R as at the start. One rank only (as in GEM-PIC-RZ).
+void Simulation::apply_chicanes(double s0, double s1) {
+    for (const auto& ch : cfg.chicanes) {
+        if (!(ch.z > s0 && ch.z <= s1)) continue;
+        if (comm.size > 1) throw std::runtime_error("chicane: not available with several MPI ranks yet");
+        const size_t n = size_t(ns) * nk;
+        std::vector<std::vector<cpx>> keep;
+        for (Buf<cpx>* p : {&Rx, &Ry}) keep.push_back(p->host());
+        auto comoving = [&](std::vector<cpx>& rx, std::vector<cpx>& ry) {
+            if (cfg.nbunch() > 1) comoving_fields_per_bunch();
+            else { currents(); comoving_field(); }
+            rx = Rx.host(); ry = Ry.host();
+        };
+        std::vector<cpx> ox, oy, nx, ny;
+        if (cfg.self_fields) comoving(ox, oy);
+        std::vector<Particle> all = host_particles(), kept;
+        for (auto p : all) {
+            if (p.alive != 1) continue;
+            const double g = std::sqrt(1 + p.px * p.px + p.py * p.py + p.pz * p.pz);
+            p.zeta += ch.r56 * (g / ch.gamma_ref - 1) - ch.delay;
+            if (p.zeta < 0 || p.zeta >= cfg.zeta[N - 1]) { ++lost_total; continue; }
+            kept.push_back(p);
+        }
+        set_particles(kept);
+        if (!cfg.self_fields) continue;
+        comoving(nx, ny);
+        for (size_t i = 0; i < n; ++i) { keep[0][i] = keep[0][i] + nx[i] - ox[i]; keep[1][i] = keep[1][i] + ny[i] - oy[i]; }
+        Rx.upload(keep[0]); Ry.upload(keep[1]);
+        march(0.0);                                    // E_z, B_z, L of R (D = 0), as at the start
+        sponge_and_real_fields();
+        const long m = long(ns + 1) * nk;
+        cpx* a0 = j0x.data(); cpx* b0 = j0y.data(); const cpx* a1 = jkx.data(); const cpx* b1 = jky.data();
+        par_for(m, [=] HD(long i) { a0[i] = a1[i]; b0[i] = b1[i]; });
+        device_sync();
+    }
 }

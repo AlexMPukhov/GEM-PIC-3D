@@ -94,7 +94,9 @@ Container setup: `apt-get update && apt-get install -y libhdf5-dev pkg-config op
 2. (done) Plasma: mobile ions, field ionization, several bunches (electrons and positrons).
 3. (done) MPI with plasma. Possible later: pipelining over steps on the GPU, CUDA-aware MPI.
 4. (done) Undulators, quadrupole, plasma lens, solenoid; expressions (constants, values, density_function,
-   K_function); checkpoints (`tests/checkpoint.sh`). Next: more function keys (laser profile/envelope, bunch
-   profiles), chicane.
+   K_function, laser profile/envelope, bunch profile_z/profile_r/gamma/ux/uy functions); checkpoints
+   (`tests/checkpoint.sh`); thin chicane (one rank). Note: a frozen bunch's field changes by ~1-2 % in the first step from the
+   co-moving start (E_z ~3 % of E_r near the bunch centre), partly macroparticle noise, partly systematic: to be
+   understood (the chicane check therefore compares field changes).
 5. Radiation energy balance check (coherent emission vs far-field integral, plane wave as undulator).
 6. Report update (it describes v1).

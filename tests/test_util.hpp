@@ -83,4 +83,6 @@ void test_undulator();
 void test_magnets();
 void test_expr_parser();
 void test_expr_profiles();
+void test_expr_functions();
 void test_checkpoint();
+void test_chicane();

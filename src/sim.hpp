@@ -65,6 +65,11 @@ struct Config {
         long nmacro = 0;
         std::string noise = "random";
         double noise_lambda = 0; int beamlet = 4; unsigned long seed = 1;
+        // functions (as GEM-PIC-RZ): profile_z(zeta) on [zeta_min, zeta_max] (distribution_z = function),
+        // gamma_function(zeta), profile_r(x, y, r, zeta) in r < r_extent (distribution_r = function),
+        // ux_function, uy_function(x, y, r, zeta): mean transverse momenta (the energy is kept)
+        Expr profile_z, gamma_fn, profile_r, ux_fn, uy_fn;
+        double zeta_min = 0, zeta_max = 0, r_extent = 0;
     };
     std::vector<Bunch> bunches;
     std::vector<Bunch> bunch_list() const;             // `bunches`, or the single bunch of the fields above
@@ -73,12 +78,15 @@ struct Config {
     std::vector<Undulator> undulators;
     std::vector<Magnet> magnets;
     std::vector<double> ktab;                          // tapers (K_function): B0(z) tables of the undulators
+    struct Chicane { double z, r56, delay, gamma_ref; };   // thin chicane (block chicane): zeta += r56 delta - delay
+    std::vector<Chicane> chicanes;
     void parse_external(const Deck& d);                // sim_external.cpp
     void summary_external(FILE* f) const;
     // grid lasers (laser blocks with type = gaussian): paraxial Gaussian pulses on the grid
     struct GridLaser {
         double a0 = 1, kL = 1, waist = 10, tau = 10, zeta_c = 0, z_focus = 0, cep = 0, pol_angle = 0;
         bool circular = false; int helicity = 1;
+        Expr profile, envelope;          // profile_function(r) at z = 0 (replaces waist, z_focus), envelope_function(zeta)
     };
     std::vector<GridLaser> glasers;
     // plasma (code units): n = n0 f(z) g(r) for r < r_max; f: table (z_points, z_values; constant beyond its
@@ -297,6 +305,7 @@ public:
     void load_bunch();
     void comoving_field();
     void comoving_fields_per_bunch();   // several bunches: each with its own beta, summed (sim_bunches.cpp)
+    void apply_chicanes(double s0, double s1);   // thin chicanes passed in this step (sim_external.cpp)
     void push(double s0, double s1, long i0, long i1);
     void exchange_particles(double s1);
     void currents();             // deposit, exchange with the rank below/above, zeta filter, spectra

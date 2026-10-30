@@ -15,14 +15,28 @@ void Config::parse_bunches(const Deck& d) {
         if (sp == "positron") u.q = 1;
         else if (sp != "electron") throw std::runtime_error(b + ".species must be electron or positron");
         u.charge = std::fabs(d.num(b, "charge", Kind::Charge));
-        if (d.has(b, "energy") == d.has(b, "gamma")) throw std::runtime_error(b + ": give either energy or gamma");
-        u.gamma = d.has(b, "gamma") ? d.num(b, "gamma", Kind::None) : 1 + d.num(b, "energy", Kind::Energy) / 0.51099895e6;
+        const int ng = d.has(b, "energy") + d.has(b, "gamma") + d.has(b, "gamma_function");
+        if (ng != 1) throw std::runtime_error(b + ": give one of energy, gamma, gamma_function");
+        u.gamma = d.has(b, "gamma") ? d.num(b, "gamma", Kind::None) : d.has(b, "energy") ? 1 + d.num(b, "energy", Kind::Energy) / 0.51099895e6 : 2;
         if (!(u.gamma > 1)) throw std::runtime_error(b + ": gamma must be > 1");
-        u.sigx = L(b, "sigma_x"); u.sigy = Ld(b, "sigma_y", u.sigx);
+        if (d.str(b, "distribution_r", "gaussian") != "function") { u.sigx = L(b, "sigma_x"); u.sigy = Ld(b, "sigma_y", u.sigx); }
         const std::string dz = d.str(b, "distribution_z", "gaussian");
         if (dz == "gaussian") u.sigz = L(b, "sigma_z");
         else if (dz == "flattop") { u.length = L(b, "length"); if (!(u.length > 0)) throw std::runtime_error(b + ".length must be > 0"); }
-        else throw std::runtime_error(b + ".distribution_z must be gaussian or flattop");
+        else if (dz == "function") {
+            u.profile_z = d.expr(b, "profile_z", {"zeta"});
+            u.zeta_min = L(b, "zeta_min"); u.zeta_max = L(b, "zeta_max");
+            if (!(u.zeta_max > u.zeta_min)) throw std::runtime_error(b + ": zeta_max must be > zeta_min");
+        } else throw std::runtime_error(b + ".distribution_z must be gaussian, flattop or function");
+        const std::string dr = d.str(b, "distribution_r", "gaussian");
+        if (dr == "function") {
+            u.profile_r = d.expr(b, "profile_r", {"x", "y", "r", "zeta"});
+            u.r_extent = L(b, "r_extent");
+            if (!(u.r_extent > 0)) throw std::runtime_error(b + ".r_extent must be > 0");
+        } else if (dr != "gaussian") throw std::runtime_error(b + ".distribution_r must be gaussian or function");
+        if (d.has(b, "gamma_function")) u.gamma_fn = d.expr(b, "gamma_function", {"zeta"});
+        if (d.has(b, "ux_function")) u.ux_fn = d.expr(b, "ux_function", {"x", "y", "r", "zeta"});
+        if (d.has(b, "uy_function")) u.uy_fn = d.expr(b, "uy_function", {"x", "y", "r", "zeta"});
         u.emitx = Ld(b, "emittance_x", 0); u.emity = Ld(b, "emittance_y", u.emitx);
         u.espread = d.num(b, "energy_spread", Kind::None, 0.0);
         u.zeta_center = Ld(b, "zeta_center", 0.75 * Lwin);
@@ -35,6 +49,19 @@ void Config::parse_bunches(const Deck& d) {
         u.seed = (unsigned long)d.integer(b, "seed", k);
         if (u.noise == "fawley" && (u.noise_lambda <= 0 || u.beamlet < 3 || u.nmacro % u.beamlet))
             throw std::runtime_error(b + ": fawley noise needs noise_wavelength > 0, beamlet >= 3, macroparticles a multiple of beamlet");
+        if (!u.profile_z.empty()) u.zeta_center = 0.5 * (u.zeta_min + u.zeta_max);
+        if (!u.gamma_fn.empty()) {                     // the bunch's gamma (summary, messages): mean over the profile
+            const double z0 = u.profile_z.empty() ? u.zeta_center - 3 * std::max(u.sigz, u.length / 6) : u.zeta_min;
+            const double z1 = u.profile_z.empty() ? u.zeta_center + 3 * std::max(u.sigz, u.length / 6) : u.zeta_max;
+            double s0 = 0, s1 = 0;
+            for (int k = 0; k <= 400; ++k) {
+                const double z = z0 + (z1 - z0) * k / 400;
+                const double w = u.profile_z.empty() ? (u.length > 0 ? 1.0 : std::exp(-0.5 * std::pow((z - u.zeta_center) / u.sigz, 2))) : std::max(0.0, u.profile_z({z}));
+                s0 += w; s1 += w * u.gamma_fn({z});
+            }
+            u.gamma = s0 > 0 ? s1 / s0 : 2;
+            if (!(u.gamma > 1)) throw std::runtime_error(b + ".gamma_function: the mean gamma must be > 1");
+        }
         for (const auto& o : bunches) if (o.name == u.name) throw std::runtime_error(b + ".name: '" + u.name + "' given twice");
         bunches.push_back(u);
     }
@@ -74,12 +101,77 @@ void Simulation::load_bunch() {
     const double p0 = std::sqrt(B.gamma * B.gamma - 1);
     const int M = B.noise == "fawley" ? B.beamlet : 1;
     const long nb = B.nmacro / M;
+    // profile_z: the inverse of its cumulative distribution (4096 intervals); profile_r: rejection, with the
+    // largest value of the profile from a scan
+    std::vector<double> cz;
+    if (!B.profile_z.empty()) {
+        const int K = 4096;
+        cz.assign(K + 1, 0.0);
+        double prev = std::max(0.0, B.profile_z({B.zeta_min}));
+        for (int k = 1; k <= K; ++k) {
+            const double f = std::max(0.0, B.profile_z({B.zeta_min + (B.zeta_max - B.zeta_min) * k / K}));
+            cz[k] = cz[k - 1] + 0.5 * (prev + f); prev = f;
+        }
+        if (!(cz[K] > 0)) throw std::runtime_error("bunch " + B.name + ": profile_z is zero on [zeta_min, zeta_max]");
+    }
+    auto sample_zeta = [&](double u01) {
+        const int K = int(cz.size()) - 1;
+        const double t = u01 * cz[K];
+        const int k = int(std::upper_bound(cz.begin(), cz.end(), t) - cz.begin()) - 1;
+        const int kk = std::min(std::max(k, 0), K - 1);
+        const double f = cz[kk + 1] > cz[kk] ? (t - cz[kk]) / (cz[kk + 1] - cz[kk]) : 0.5;
+        return B.zeta_min + (B.zeta_max - B.zeta_min) * (kk + f) / K;
+    };
+    double fr = 0, srx = B.sigx, sry = B.sigy;        // srx, sry: rms sizes (of profile_r: from the scan)
+    if (!B.profile_r.empty()) {
+        double w = 0, wx = 0, wy = 0;
+        const double z0 = cz.empty() ? B.zeta_center - 3 * std::max(B.sigz, B.length / 6) : B.zeta_min;
+        const double z1 = cz.empty() ? B.zeta_center + 3 * std::max(B.sigz, B.length / 6) : B.zeta_max;
+        for (int kz = 0; kz <= 16; ++kz)
+            for (int i = -48; i <= 48; ++i)
+                for (int j = -48; j <= 48; ++j) {
+                    const double xr = B.r_extent * i / 48, yr = B.r_extent * j / 48, r = std::hypot(xr, yr);
+                    if (r >= B.r_extent) continue;
+                    const double f = std::max(0.0, B.profile_r({xr, yr, r, z0 + (z1 - z0) * kz / 16}));
+                    fr = std::max(fr, f); w += f; wx += f * xr * xr; wy += f * yr * yr;
+                }
+        if (!(fr > 0)) throw std::runtime_error("bunch " + B.name + ": profile_r is zero in r < r_extent");
+        srx = std::sqrt(wx / w); sry = std::sqrt(wy / w);
+        fr *= 1.2;
+    }
+    const bool fn = !cz.empty() || !B.profile_r.empty() || !B.gamma_fn.empty() || !B.ux_fn.empty() || !B.uy_fn.empty();
     for (long ib = 0; ib < nb; ++ib) {
-        const double x = B.x0 + B.sigx * G(rng), y = B.y0 + B.sigy * G(rng);
-        const double z = B.length > 0 ? B.length * U(rng) : B.sigz * G(rng);
-        const double px = B.sigx > 0 ? B.emitx / B.sigx * G(rng) : 0;
-        const double py = B.sigy > 0 ? B.emity / B.sigy * G(rng) : 0;
-        const double pz = p0 * (1 + B.espread * G(rng));
+        double x, y, z, px, py, pz, zf = 0;              // zf: window position of a function profile
+        if (!fn) {                                       // (the random sequence of the built-in profiles)
+            x = B.x0 + B.sigx * G(rng); y = B.y0 + B.sigy * G(rng);
+            z = B.length > 0 ? B.length * U(rng) : B.sigz * G(rng);
+            px = B.sigx > 0 ? B.emitx / B.sigx * G(rng) : 0;
+            py = B.sigy > 0 ? B.emity / B.sigy * G(rng) : 0;
+            pz = p0 * (1 + B.espread * G(rng));
+        } else {
+            zf = cz.empty() ? B.zeta_center + (B.length > 0 ? B.length * U(rng) : B.sigz * G(rng)) : sample_zeta(U(rng) + 0.5);
+            double xr, yr;
+            if (B.profile_r.empty()) { xr = B.sigx * G(rng); yr = B.sigy * G(rng); }
+            else for (;;) {
+                xr = B.r_extent * 2 * U(rng); yr = B.r_extent * 2 * U(rng);
+                const double r = std::hypot(xr, yr);
+                if (r >= B.r_extent) continue;
+                const double f = B.profile_r({xr, yr, r, zf});
+                if (f > fr) throw std::runtime_error("bunch " + B.name + ": profile_r exceeds the estimate of its maximum (narrow peak?)");
+                if ((U(rng) + 0.5) * fr < f) break;
+            }
+            const double r = std::hypot(xr, yr);
+            x = B.x0 + xr; y = B.y0 + yr;
+            px = B.emitx > 0 && srx > 0 ? B.emitx / srx * G(rng) : 0;
+            py = B.emity > 0 && sry > 0 ? B.emity / sry * G(rng) : 0;
+            if (!B.ux_fn.empty()) px += B.ux_fn({xr, yr, r, zf});
+            if (!B.uy_fn.empty()) py += B.uy_fn({xr, yr, r, zf});
+            const double gl = B.gamma_fn.empty() ? B.gamma : B.gamma_fn({zf});
+            const double ptot = std::sqrt(gl * gl - 1) * (1 + B.espread * G(rng));
+            if (px * px + py * py >= ptot * ptot) throw std::runtime_error("bunch " + B.name + ": transverse momentum above the total");
+            pz = std::sqrt(ptot * ptot - px * px - py * py);       // the energy is kept
+            z = (zf - B.zeta_center) * pz / std::sqrt(1 + ptot * ptot);   // lab offset: p.zeta = zf
+        }
         std::vector<double> dz(M, 0.0);
         if (M > 1) {
             // beamlet: M particles spread evenly over noise_wavelength, displaced so that the bunching at the

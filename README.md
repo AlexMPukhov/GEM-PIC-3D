@@ -20,7 +20,7 @@ with the radiation of the bunch resolved on the grid and acting back on it
 
 ```
 make                      # build/gempic3d and build/tests (C++17, OpenMP, no external libraries)
-make test                 # 98 checks against analytic references, a few minutes on one core
+make test                 # 105 checks against analytic references, a few minutes on one core
 make physics              # ion collapse on a large grid: seconds on a GPU, minutes on a 24-core node
 make MPI=1 BUILD=build-mpi                 # MPI (mpicxx); test: sh tests/mpi.sh build-mpi/gempic3d
 make CUDA=1 CUDA_ARCH=-arch=sm_120 BUILD=build-gpu  # GPU (nvcc, cuFFT; sm_80 A100, sm_90 H100/GH200); add MPI=1 for both
@@ -196,7 +196,11 @@ gathered fields of the bunch push and of the streaming particles; the field solv
   at a fringe (3 % in the canonical angular momentum of the solenoid check at L/50 steps).
 - **Taper:** `K_function` (an expression of the lab position z) replaces `K`; it is tabulated with 32 points per
   period, as in GEM-PIC-RZ.
-- **Not yet:** the chicane.
+- **Chicane** (block `chicane`, thin, at `z`): every beam particle moves in ζ by r56 (γ/γ_ref − 1) − `delay`
+  (r56 > 0: more energy moves towards the head; `delay` default |r56|/2, reference `gamma` or `energy`). The co-moving
+  field of the beam moves with it: the co-moving fields R of the old and the new positions are subtracted and added
+  (vacuum at the chicane), E_z, B_z and L follow from R as at the start; the radiation and the part of the field that
+  is not co-moving stay. One rank only, as in GEM-PIC-RZ.
 
 ## Checkpoints and restart
 
@@ -229,6 +233,11 @@ A number with a unit of the wrong kind stays an error. Keys that take functions 
 |---|---|---|---|
 | `plasma` | `density_function` | x, y, z, r | factor of the density (x, y relative to the axis, z the lab position; < 0 counts as 0) |
 | `undulator` | `K_function` | z | taper K(z), replaces `K` |
+| `laser` (`type = gaussian`) | `profile_function` | r | transverse field profile at z = 0, replaces `waist` and `z_focus` (the field is given where the run starts) |
+| `laser` (`type = gaussian`) | `envelope_function` | zeta | longitudinal envelope of the field, replaces `tau_fwhm`; `zeta_center` (the reference of the carrier phase) defaults to the centre of the intensity |
+| `bunch` | `profile_z` (with `distribution_z = function`) | zeta | current profile on [`zeta_min`, `zeta_max`], any normalization, ≥ 0, sampled by the inverse of its cumulative distribution |
+| `bunch` | `profile_r` (with `distribution_r = function`), `ux_function`, `uy_function` | x, y, r, zeta | transverse density, sampled by rejection in r < `r_extent`; mean transverse momenta [m c] (the energy is kept) |
+| `bunch` | `gamma_function` | zeta | γ(ζ) (energy chirp), replaces `gamma`/`energy`; `energy_spread` is relative to the local value |
 
 ```
 constants { n0 = 3.5e18 cm^-3;  Lup = 100 um }
@@ -453,7 +462,9 @@ diag.light {
 | undulators (one electron, γ = 100, K = 1): planar u_x amplitude K, no drift; slippage over 6 periods against the exact integral of (γ − p_z)/p_z; helical \|u⊥\| = K; natural focusing k_β = K k_u/(√2 γ) | 1e-6; 6e-17; 7e-6; 5e-7; 3e-4 |
 | quadrupole x0 cos(√k L) and y0 cosh(√k L), plasma lens x0 cos(√k L) (γ = 1000, √k L = 1); solenoid with fringes: canonical angular momentum x p_y − y p_x − B r²/2 | 1e-7; 4e-8 (relative to B r²/2) |
 | expressions: operators, functions, units and constants against direct values; a deck value as an expression; wrong unit kind | 1e-16; exact; error |
+| grid laser `profile_function`, `envelope_function` = built-in Gaussian (start fields); bunch functions: flat-top `profile_z` rms, `gamma_function` per particle, ring `profile_r` mean radius (5 + σ²/5), rigid-rotation `ux/uy_function` per particle with the energy kept | 6e-14; 0.2 %; 3e-14; 0.03 %; 7e-15 |
 | `density_function` = the built-in parabolic channel (3 steps of a laser wake); `K_function = 1` = `K = 1`; linear taper: slippage against ∫⟨(γ − p_z)/p_z⟩ at the local K | 6e-10 (float output); 0; 4e-4 |
+| chicane (frozen γ = 1000 bunch): change of E⊥, B⊥ by a delay of 20 k0⁻¹ against the change of the co-moving start field; R56 = 50 k0⁻¹ with 1 % spread: shift of every particle | 8e-8 (float output); 7e-15 |
 | checkpoint (plasma ramp, laser wake, mobile H⁺, ionizing N⁵⁺, bunch, moving window): 2 steps, checkpoint, restart, 2 steps against 4 steps; `tests/checkpoint.sh`: `--restart latest` from step 4 of 12 (1 and 2 ranks), wall-time stop | fields 5e-10 (thread sums), beam list and window exact; `diag.txt`, `ionization.txt` identical; exit code 3 |
 | GUI (`tests/gui.sh`): frames, cuts, 2 ranks = 1 rank, plasma frames | pass |
 | output groups and openPMD (`tests/openpmd.sh`): periods and selections of two groups, openPMD attributes and input deck, particles = native beam file, fields = native field file and axis file on a uniform grid | pass; 1.5e-7; exact; 1.5e-11 |

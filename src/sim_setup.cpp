@@ -208,6 +208,7 @@ void Simulation::step() {
         par_for(n, [=] HD(long i) { a0[i] = a1[i]; b0[i] = b1[i]; });
         device_sync();
     } else if (cfg.self_fields) solve_fields(0.5 * cfg.dz);
+    if (!cfg.chicanes.empty()) apply_chicanes(s - cfg.dz, s);
     window_shift_post();
     comm.wait_sends();
 }

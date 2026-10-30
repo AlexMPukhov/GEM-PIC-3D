@@ -110,3 +110,60 @@ void test_expr_profiles() {
     }
     close("expressions: tapered undulator K(z), slippage = integral at the local K", slip, ref, 1e-3);
 }
+
+// 26. Functions of lasers and bunches. (a) grid laser with profile_function exp(-(r/w0)^2) and envelope_function
+//     exp(-2 ln2 (zeta - zc)^2 / tau^2) against the built-in Gaussian focused at z = 0: the fields at the start.
+//     (b) bunch: profile_z = rect(zeta - 60, 20) on [45, 75]: rms length 20 / sqrt(12); gamma_function = 200 + 2
+//     (zeta - 60): each particle; profile_r = gauss(r - 5, 0.5) in r < 10: the mean radius (5 + 0.5^2/5); ux, uy
+//     functions of a rigid rotation (-0.5 y, 0.5 x): each particle (at t = 0), with |p| = sqrt(gamma^2 - 1) kept.
+static std::vector<float> laser_start(bool fn) {
+    Config c = base(32, 32, 161, 80, 80, 160);
+    c.move_x = c.move_y = false; c.dz = 20; c.dz_push = 20;
+    Config::GridLaser g; g.a0 = 1; g.kL = 1; g.waist = 12; g.tau = 25; g.zeta_c = 100;
+    if (fn) {
+        const Deck d = expr_deck(c);
+        g.profile = Expr("exp(-(r / (12 k0^-1))^2)", {"r"}, {}, d.unit_fn());
+        g.envelope = Expr("exp(-2 * ln(2) * ((zeta - 100 k0^-1) / (25 k0^-1))^2)", {"zeta"}, {}, d.unit_fn());
+    }
+    c.glasers.push_back(g);
+    Simulation sim(c, comm);
+    sim.init();
+    return sim.F.host();
+}
+void test_expr_functions() {
+    const std::vector<float> a = laser_start(false), b = laser_start(true);
+    double d = 0, m = 0;
+    for (size_t i = 0; i < a.size(); ++i) { d = std::max(d, double(std::fabs(a[i] - b[i]))); m = std::max(m, double(std::fabs(a[i]))); }
+    check(m > 0 && d <= 1e-6 * m, "functions: grid laser profile_function, envelope_function = built-in Gaussian", d / m, 0, 1e-6);
+    Config c = base(32, 32, 121, 60, 60, 120);
+    c.move_x = c.move_y = false; c.dz = 20; c.dz_push = 20; c.self_fields = false;
+    const Deck dk = expr_deck(c);
+    const Expr::UnitFn uf = dk.unit_fn();
+    Config::Bunch bz;
+    bz.charge = 1e-12; bz.nmacro = 100000; bz.sigx = bz.sigy = 3;
+    bz.profile_z = Expr("rect(zeta - 60, 20)", {"zeta"}, {}, uf); bz.zeta_min = 45; bz.zeta_max = 75; bz.zeta_center = 60;
+    bz.gamma_fn = Expr("200 + 2 * (zeta - 60)", {"zeta"}, {}, uf); bz.gamma = 200;
+    Config::Bunch br = bz;
+    br.name = "ring"; br.seed = 2; br.profile_z = Expr(); br.sigz = 5; br.gamma_fn = Expr(); br.gamma = 50;
+    br.profile_r = Expr("gauss(r - 5, 0.5)", {"x", "y", "r", "zeta"}, {}, uf); br.r_extent = 10;
+    br.ux_fn = Expr("-0.5 * y", {"x", "y", "r", "zeta"}, {}, uf); br.uy_fn = Expr("0.5 * x", {"x", "y", "r", "zeta"}, {}, uf);
+    c.bunches = {bz, br};
+    Simulation sim(c, comm);
+    sim.init();
+    double s0 = 0, s1 = 0, s2 = 0, gd = 0, r0 = 0, rs = 0, ud = 0;
+    for (const auto& p : sim.host_particles()) {
+        const double g = std::sqrt(1 + p.px * p.px + p.py * p.py + p.pz * p.pz);
+        if (p.sp == 0) { s0 += 1; s1 += p.zeta; s2 += p.zeta * p.zeta; gd = std::max(gd, std::fabs(g - (200 + 2 * (p.zeta - 60)))); }
+        else {                                     // (x, y) at t = 0: the loading drifts them to the plane z = 0
+            const double x = p.x + sim.X0 + p.px * (p.zeta - 60) / g, y = p.y + sim.Y0 + p.py * (p.zeta - 60) / g;
+            r0 += 1; rs += std::hypot(x, y);
+            ud = std::max({ud, std::fabs(p.px + 0.5 * y), std::fabs(p.py - 0.5 * x), std::fabs(g - 50)});
+        }
+    }
+    close("functions: bunch profile_z = rect: rms length L / sqrt(12)", std::sqrt(s2 / s0 - s1 * s1 / (s0 * s0)), 20 / std::sqrt(12.0), 0.01);
+    check(gd < 1e-6, "functions: bunch gamma_function at each particle", gd, 0, 1e-6);
+    double m0 = 0, m1 = 0;                         // <r> of the density gauss(r - 5, 0.5) in the plane (weight r dr)
+    for (int k = 0; k < 10000; ++k) { const double r = 10.0 * (k + 0.5) / 10000, f = std::exp(-0.5 * std::pow((r - 5) / 0.5, 2)) * r; m0 += f; m1 += f * r; }
+    close("functions: bunch profile_r = ring: mean radius", rs / r0, m1 / m0, 0.003);
+    check(ud < 1e-9, "functions: ux, uy functions (rigid rotation), energy kept", ud, 0, 1e-9);
+}

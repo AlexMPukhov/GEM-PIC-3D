@@ -29,7 +29,9 @@ expressions).
 | | `gamma` *or* `energy` | — | Lorentz factor, or the kinetic energy (`MeV`, `GeV`, …) |
 | | `energy_spread` | 0 | relative rms spread of p_z |
 | | `sigma_x`, `sigma_y` | —, σ_x | rms transverse sizes |
-| | `distribution_z`, `sigma_z`, `length` | gaussian | `gaussian` with rms `sigma_z` (in the lab at t = 0), or `flattop` of full `length` |
+| | `distribution_z`, `sigma_z`, `length` | gaussian | `gaussian` with rms `sigma_z` (in the lab at t = 0), `flattop` of full `length`, or `function`: `profile_z(zeta)` on [`zeta_min`, `zeta_max`] |
+| | `distribution_r`, `profile_r`, `r_extent` | gaussian | `function`: transverse density `profile_r(x, y, r, zeta)` in r < `r_extent` (replaces `sigma_x`, `sigma_y`) |
+| | `gamma_function`, `ux_function`, `uy_function` | — | γ(ζ) (replaces `gamma`); mean transverse momenta (x, y, r, zeta), the energy kept |
 | | `emittance_x`, `emittance_y` | 0, ε_x | normalized rms emittance |
 | | `zeta_center`, `x0`, `y0` | 0.75 window, 0, 0 | position of the centre in the window; transverse offset |
 | | `macroparticles`, `seed` | 100000, k (block number) | each bunch draws from its own seed |
@@ -37,7 +39,7 @@ expressions).
 | numerics | `self_fields` | true | false: test particles in the laser only |
 | | `zeta_filter`, `k_filter` | true, true | current filters |
 | | `push_phase` | 0.05 rad | laser phase per RK4 sub-step |
-| | `type` | plane_wave | `plane_wave` (analytic, above) or `gaussian` (on the grid): `a0`, `wavelength`, `waist`, `tau_fwhm`, `zeta_center`, `z_focus` (0), `cep`, `polarization` (linear, circular), `pol_angle`, `helicity`, `enabled` |
+| | `type` | plane_wave | `plane_wave` (analytic, above) or `gaussian` (on the grid): `a0`, `wavelength`, `waist` *or* `profile_function(r)`, `tau_fwhm` *or* `envelope_function(zeta)`, `zeta_center`, `z_focus` (0), `cep`, `polarization` (linear, circular), `pol_angle`, `helicity`, `enabled` |
 | plasma | `density` | — | cm^-3 or n_c |
 | | `free_electrons` | true | false: a neutral gas, all electrons come from field ionization (ion blocks with `charge_state = 0`) |
 | | `z_points`, `z_values` | — | longitudinal profile (relative), linear between the points |
@@ -59,6 +61,7 @@ expressions).
 | quadrupole, plasma_lens (0 … N) | `z_start`, `length`, `gradient` (T/m) | 0, —, — | quadrupole B_x = −G y, B_y = −G x (G > 0 focuses electrons in x); plasma lens B_φ = −G r (focuses electrons) |
 | | `radius` | ∞ | plasma lens: B_φ = −G R²/r outside |
 | solenoid (0 … N) | `z_start`, `length`, `field` (T), `ramp` | 0, —, —, 0 | B_z = B f(z), B_r = −(r/2) B f′(z), linear fringes of length `ramp` (use ramp > 0: the fringes focus) |
+| chicane (0 … N) | `z`, `r56`, `delay`, `gamma` *or* `energy` | —, —, \|r56\|/2, — | thin chicane at z: ζ += r56 (γ/γ_ref − 1) − delay for every beam particle (README) |
 | numerics | `iterations`, `predictor` | 2, extrapolate | passes per slice; prediction of the streaming current (`previous`: as GEM-PIC-RZ) |
 | | `vz_min`, `vz_beam`, `trap_advance` | 0.8, 0.9, 1 | trapping and return to streaming, as in GEM-PIC-RZ |
 | output | `dir`, `every`, `particles`, `frames` | out, 10, true, false | `every`: period of `diag.txt` and of the main output's fields; `particles`: start/end dumps; `frames`: frame_NNNNN.bin for the GUI |

@@ -102,3 +102,48 @@ void test_magnets() {
     }
     check(lmax < 1e-6 * 0.5 * B, "solenoid: canonical angular momentum conserved (relative to B r^2/2)", lmax / (0.5 * B), 0, 1e-6);
 }
+
+// 25. Thin chicane, frozen gamma = 1000 bunch in vacuum. (a) r56 = 0, delay 20 k0^-1 at the end of step 1: the
+//     change of the transverse fields by the chicane (run with it minus run without) equals the change of the
+//     co-moving field at the start between the bunch at zeta_c - 20 and at zeta_c (the co-moving field moves with
+//     the beam; the rest of the field stays). (b) R56 = 50 k0^-1, energy spread 1 %: every particle moves by
+//     r56 (gamma / gamma_ref - 1) - delay.
+static Simulation* chicane_run(double zc, int steps, bool with, double r56, double espread, std::vector<Particle>& before) {
+    Config c = base(32, 32, 121, 60, 60, 120);
+    c.move_x = c.move_y = false; c.dz = 20; c.dz_push = 20; c.z_end = 1e9; c.freeze_bunch = true;
+    Config::Bunch b;
+    b.charge = 1e-12; b.gamma = 1000; b.sigx = b.sigy = 4; b.sigz = 5; b.zeta_center = zc; b.nmacro = 20000; b.espread = espread;
+    c.bunches = {b};
+    if (with) c.chicanes = {Config::Chicane{20, r56, r56 == 0 ? 20.0 : 0.0, 1000}};
+    Simulation* sim = new Simulation(c, comm);
+    sim->init();
+    before = sim->host_particles();
+    for (int k = 0; k < steps; ++k) sim->step();
+    return sim;
+}
+void test_chicane() {
+    std::vector<Particle> p0;
+    Simulation* a = chicane_run(70, 1, true, 0, 0, p0);
+    Simulation* c = chicane_run(70, 1, false, 0, 0, p0);
+    Simulation* i70 = chicane_run(70, 0, false, 0, 0, p0);
+    Simulation* i50 = chicane_run(50, 0, false, 0, 0, p0);
+    const std::vector<float> fa = a->F.host(), fc = c->F.host(), f70 = i70->F.host(), f50 = i50->F.host();
+    const size_t fpl = size_t(a->ns + 2) * a->nk;
+    double d = 0, m = 0;
+    for (int comp : {0, 1, 3, 4})
+        for (size_t i = comp * fpl; i < (comp + 1) * fpl; ++i) {
+            const double ref = double(f50[i]) - double(f70[i]);
+            d = std::max(d, std::fabs(double(fa[i]) - double(fc[i]) - ref)); m = std::max(m, std::fabs(ref));
+        }
+    check(m > 0 && d <= 1e-6 * m, "chicane: the co-moving field moves with the delayed beam (transverse fields)", d / m, 0, 1e-6);
+    delete a; delete c; delete i70; delete i50;
+    Simulation* e = chicane_run(60, 1, true, 50, 0.01, p0);
+    const std::vector<Particle> p1 = e->host_particles();
+    double dz = p1.size() == p0.size() ? 0 : 1e300;
+    for (size_t i = 0; i < p1.size() && i < p0.size(); ++i) {
+        const double g = std::sqrt(1 + p0[i].px * p0[i].px + p0[i].py * p0[i].py + p0[i].pz * p0[i].pz);
+        dz = std::max(dz, std::fabs(p1[i].zeta - p0[i].zeta - 50 * (g / 1000 - 1)));
+    }
+    check(dz < 1e-9, "chicane: each particle moves by r56 (gamma / gamma_ref - 1)", dz, 0, 1e-9);
+    delete e;
+}
