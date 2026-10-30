@@ -5,7 +5,8 @@
 //  file-based series, basePath /data/%T/ (T = step), one file per output step of a group:
 //    <group dir>/<openpmd_file>.h5     default openpmd/data_%06T: the selected fields and/or beams
 //
-//  meshes   E, B (components x, y, z), n_e (plasma electrons streaming through the window, with plasma):
+//  meshes   E, B (components x, y, z), n_e (plasma electrons streaming through the window, with plasma), n_i
+//           (Z n_i of the mobile ions, a charge density in units of e, with ion blocks):
 //           geometry cartesian, data [zeta][y][x] (C order, axisLabels z, y, x), SI via unitSI.
 //           Uniform grids (Fourier y, uniform zeta): the code's own nodes, exact. Free-hand y or zeta:
 //           records interpolated to a uniform grid (openpmd_dy, openpmd_dzeta of the group; default the
@@ -15,7 +16,8 @@
 //  coordinates  a level s is shown at the time t = s/c with z = s + zeta (gridGlobalOffset z = s). In the
 //           GT2 frame of the code the data of a level lie on the lab plane z = s at the times t = s - zeta.
 //           x, y: lab positions (the transverse window offset is in gridGlobalOffset).
-//  particles  "bunch" and "trapped" (plasma electrons in the beam list): position (z = zeta, positionOffset
+//  particles  "bunch", "trapped" (plasma electrons in the beam list) and "inj_<ion>" (electrons from the field
+//           ionization of that ion species in the beam list): position (z = zeta, positionOffset
 //           z = s), momentum per real particle, weighting (real particles per macroparticle), constant charge
 //           and mass, one particle patch with the bounding box.
 //  The fields are those of the end of the step (after the sponge), as used by the next push.
@@ -23,159 +25,7 @@
 #include "sim.hpp"
 
 #ifdef GEMPIC_HDF5
-#include <hdf5.h>
-#include <algorithm>
-#include <cmath>
-#include <ctime>
-#include <filesystem>
-#include <stdexcept>
-#include <string>
-#include <memory>
-#include <type_traits>
-#include <vector>
-
-namespace {
-inline bool is_half(int c) { return c == 1 || c == 3 || c == 5; }   // E_y, B_x, B_z: half-nodes of the free-hand y
-void check(herr_t e, const std::string& what) {
-    if (e < 0) throw std::runtime_error("HDF5 error: " + what);
-}
-class Handle {
-public:
-    Handle(hid_t id, herr_t (*closer)(hid_t), const std::string& what) : id_(id), close_(closer) {
-        if (id < 0) throw std::runtime_error("HDF5 error: " + what);
-    }
-    Handle(const Handle&) = delete;
-    Handle& operator=(const Handle&) = delete;
-    ~Handle() { if (id_ >= 0) close_(id_); }
-    operator hid_t() const { return id_; }
-private:
-    hid_t id_;
-    herr_t (*close_)(hid_t);
-};
-
-class Writer {
-public:
-    Writer(const std::string& path, bool single, int level) : file_(create(path), H5Fclose, "cannot create " + path), single_(single), level_(level) {}
-    hid_t file() const { return file_; }
-    static void attr(hid_t obj, const char* name, double v) {
-        Handle sp(H5Screate(H5S_SCALAR), H5Sclose, "dataspace");
-        Handle a(H5Acreate2(obj, name, H5T_IEEE_F64LE, sp, H5P_DEFAULT, H5P_DEFAULT), H5Aclose, name);
-        check(H5Awrite(a, H5T_NATIVE_DOUBLE, &v), name);
-    }
-    static void attrU32(hid_t obj, const char* name, unsigned v) {
-        Handle sp(H5Screate(H5S_SCALAR), H5Sclose, "dataspace");
-        Handle a(H5Acreate2(obj, name, H5T_STD_U32LE, sp, H5P_DEFAULT, H5P_DEFAULT), H5Aclose, name);
-        check(H5Awrite(a, H5T_NATIVE_UINT, &v), name);
-    }
-    static void attr(hid_t obj, const char* name, const std::string& v) {
-        Handle t(H5Tcopy(H5T_C_S1), H5Tclose, "string type");
-        check(H5Tset_size(t, v.empty() ? 1 : v.size()), "string size");
-        check(H5Tset_strpad(t, H5T_STR_NULLTERM), "string pad");
-        Handle sp(H5Screate(H5S_SCALAR), H5Sclose, "dataspace");
-        Handle a(H5Acreate2(obj, name, t, sp, H5P_DEFAULT, H5P_DEFAULT), H5Aclose, name);
-        const std::string s = v.empty() ? std::string(1, '\0') : v;
-        check(H5Awrite(a, t, s.c_str()), name);
-    }
-    static void attr(hid_t obj, const char* name, const std::vector<double>& v) {
-        const hsize_t n = v.size();
-        Handle sp(H5Screate_simple(1, &n, nullptr), H5Sclose, "dataspace");
-        Handle a(H5Acreate2(obj, name, H5T_IEEE_F64LE, sp, H5P_DEFAULT, H5P_DEFAULT), H5Aclose, name);
-        check(H5Awrite(a, H5T_NATIVE_DOUBLE, v.data()), name);
-    }
-    static void attr(hid_t obj, const char* name, const std::vector<unsigned long long>& v) {
-        const hsize_t n = v.size();
-        Handle sp(H5Screate_simple(1, &n, nullptr), H5Sclose, "dataspace");
-        Handle a(H5Acreate2(obj, name, H5T_STD_U64LE, sp, H5P_DEFAULT, H5P_DEFAULT), H5Aclose, name);
-        check(H5Awrite(a, H5T_NATIVE_ULLONG, v.data()), name);
-    }
-    static void attr(hid_t obj, const char* name, const std::vector<std::string>& v) {   // fixed-length strings
-        size_t len = 1;
-        for (const auto& x : v) len = std::max(len, x.size() + 1);
-        std::string buf(len * v.size(), '\0');
-        for (size_t k = 0; k < v.size(); ++k) std::copy(v[k].begin(), v[k].end(), buf.begin() + long(k * len));
-        Handle t(H5Tcopy(H5T_C_S1), H5Tclose, "string type");
-        check(H5Tset_size(t, len), "string size");
-        check(H5Tset_strpad(t, H5T_STR_NULLTERM), "string pad");
-        const hsize_t n = v.size();
-        Handle sp(H5Screate_simple(1, &n, nullptr), H5Sclose, "dataspace");
-        Handle a(H5Acreate2(obj, name, t, sp, H5P_DEFAULT, H5P_DEFAULT), H5Aclose, name);
-        check(H5Awrite(a, t, buf.data()), name);
-    }
-    hid_t groups(const std::string& path) {   // with all parents, returned open
-        size_t p = 1;
-        for (;;) {
-            p = path.find('/', p);
-            const std::string sub = path.substr(0, p);
-            if (H5Lexists(file_, sub.c_str(), H5P_DEFAULT) <= 0) {
-                Handle g(H5Gcreate2(file_, sub.c_str(), H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT), H5Gclose, "group " + sub);
-            }
-            if (p == std::string::npos) break;
-            ++p;
-        }
-        return H5Gopen2(file_, path.c_str(), H5P_DEFAULT);
-    }
-    // float data (fields, particles); forceDouble: coordinates and scalars always in double precision
-    template <class T> hid_t data(const std::string& path, const std::vector<hsize_t>& dims, const T* v, bool forceDouble = false) {
-        const hid_t ft = (single_ && !forceDouble) ? H5T_IEEE_F32LE : H5T_IEEE_F64LE;
-        const hid_t mt = std::is_same<T, float>::value ? H5T_NATIVE_FLOAT : H5T_NATIVE_DOUBLE;
-        hid_t ds = create(path, dims, ft);
-        if (ds < 0) throw std::runtime_error("HDF5 error: dataset " + path);
-        check(H5Dwrite(ds, mt, H5S_ALL, H5S_ALL, H5P_DEFAULT, v), "write " + path);
-        return ds;
-    }
-    void u64(const std::string& path, const unsigned long long v) {
-        const hsize_t n = 1;
-        Handle sp(H5Screate_simple(1, &n, nullptr), H5Sclose, "dataspace");
-        Handle ds(H5Dcreate2(file_, path.c_str(), H5T_STD_U64LE, sp, H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT), H5Dclose, path);
-        check(H5Dwrite(ds, H5T_NATIVE_ULLONG, H5S_ALL, H5S_ALL, H5P_DEFAULT, &v), "write " + path);
-    }
-    void text(const std::string& path, const std::string& s) {
-        Handle t(H5Tcopy(H5T_C_S1), H5Tclose, "string type");
-        check(H5Tset_size(t, s.empty() ? 1 : s.size()), "string size");
-        Handle sp(H5Screate(H5S_SCALAR), H5Sclose, "dataspace");
-        Handle ds(H5Dcreate2(file_, path.c_str(), t, sp, H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT), H5Dclose, path);
-        const std::string v = s.empty() ? std::string(1, '\0') : s;
-        check(H5Dwrite(ds, t, H5S_ALL, H5S_ALL, H5P_DEFAULT, v.c_str()), "write " + path);
-    }
-private:
-    Handle file_;
-    bool single_;
-    int level_;
-    static hid_t create(const std::string& path) {
-        const hid_t fapl = H5Pcreate(H5P_FILE_ACCESS);     // HDF5 >= 1.8 format: attributes larger than 64 kB
-        H5Pset_libver_bounds(fapl, H5F_LIBVER_V18, H5F_LIBVER_LATEST);
-        const hid_t f = H5Fcreate(path.c_str(), H5F_ACC_TRUNC, H5P_DEFAULT, fapl);
-        H5Pclose(fapl);
-        return f;
-    }
-    hid_t create(const std::string& path, const std::vector<hsize_t>& dims, hid_t type) {
-        Handle sp(H5Screate_simple(int(dims.size()), dims.data(), nullptr), H5Sclose, "dataspace " + path);
-        Handle pl(H5Pcreate(H5P_DATASET_CREATE), H5Pclose, "property list");
-        bool empty = false;
-        for (hsize_t d : dims) empty = empty || d == 0;
-        if (level_ > 0 && !empty) {     // chunks: one slice of a field, or 65536 particles
-            std::vector<hsize_t> ch(dims);
-            if (ch.size() == 1) ch[0] = std::min<hsize_t>(ch[0], 65536);
-            else ch[0] = 1;
-            check(H5Pset_chunk(pl, int(ch.size()), ch.data()), "chunk " + path);
-            check(H5Pset_shuffle(pl), "shuffle " + path);
-            check(H5Pset_deflate(pl, unsigned(level_)), "deflate " + path);
-        }
-        return H5Dcreate2(file_, path.c_str(), type, sp, H5P_DEFAULT, pl, H5P_DEFAULT);
-    }
-};
-
-// linear interpolation weights from the (increasing) nodes x to the points q, clamped at the ends
-void stencil(const std::vector<double>& x, const std::vector<double>& q, std::vector<int>& i0, std::vector<double>& w) {
-    i0.resize(q.size()); w.resize(q.size());
-    for (size_t k = 0; k < q.size(); ++k) {
-        if (x.size() < 2 || q[k] <= x.front()) { i0[k] = 0; w[k] = 0; continue; }
-        if (q[k] >= x.back()) { i0[k] = int(x.size()) - 2; w[k] = 1; continue; }
-        const int j = int(std::upper_bound(x.begin(), x.end(), q[k]) - x.begin()) - 1;
-        i0[k] = j; w[k] = (q[k] - x[j]) / (x[j + 1] - x[j]);
-    }
-}
-}  // namespace
+#include "openpmd_writer.hpp"
 
 void Simulation::write_openpmd(const Config::OutGroup& g, bool fields, bool beams) {
     const int comps = fields ? g.fields : 0;
@@ -185,6 +35,7 @@ void Simulation::write_openpmd(const Config::OutGroup& g, bool fields, bool beam
     const long nkk = nk, fpl = long(ns + 2) * nk;
     // ---- gather the components to rank 0: [N][ny][nx] (box order: x index from X0, y index from Y0)
     const bool want_ne = (comps >> 6 & 1) && cfg.plasma_on && rho_full.size();
+    const bool want_ni = (comps >> 7 & 1) && rho_full_i.size();
     std::vector<std::vector<float>> full(7);
     const std::vector<float> Fh = cfg.self_fields ? F.host() : std::vector<float>(F.size(), 0.0f);
     for (int c = 0; c < 6; ++c) {
@@ -197,6 +48,8 @@ void Simulation::write_openpmd(const Config::OutGroup& g, bool fields, bool beam
     }
     std::vector<float> rh;
     if (want_ne && comm.rank == 0) rh = rho_full.host();      // plasma: one rank
+    std::vector<float> rhi;
+    if (want_ni && comm.rank == 0) rhi = rho_full_i.host();
     // ---- particles to rank 0
     std::vector<Particle> P;
     if (particles) {
@@ -305,12 +158,13 @@ void Simulation::write_openpmd(const Config::OutGroup& g, bool fields, bool beam
     };
     const std::string mp = base + "/meshes";
     if (comps) { Handle h(W.groups(mp), H5Gclose, mp); }
-    // value of component c (or n_e: c = 6) at code slice n, code row j, column i
+    // value of component c (or n_e: c = 6, Z n_i: c = 7) at code slice n, code row j, column i
     auto value = [&](int c, int n, int j, int i) -> double {
         if (c < 6) return full[c][(size_t(n) * ny + j) * nx + i];
-        // n_e / at slices: mean of the adjacent half-cells, -rho in units of n_c
-        const double lo = n > 0 ? rh[(size_t(n - 1) * ny + j) * nx + i] : 0.0, hi = n < N - 1 ? rh[(size_t(n) * ny + j) * nx + i] : 0.0;
-        return -0.5 * (lo + hi);
+        // densities at slices: mean of the adjacent half-cells, -rho_e or rho_i in units of n_c
+        const std::vector<float>& r = c == 6 ? rh : rhi;
+        const double lo = n > 0 ? r[(size_t(n - 1) * ny + j) * nx + i] : 0.0, hi = n < N - 1 ? r[(size_t(n) * ny + j) * nx + i] : 0.0;
+        return (c == 6 ? -0.5 : 0.5) * (lo + hi);
     };
     const char* cname[3] = {"x", "y", "z"};
     std::vector<float> buf;
@@ -355,9 +209,11 @@ void Simulation::write_openpmd(const Config::OutGroup& g, bool fields, bool beam
                 Writer::attr(ds, "position", std::vector<double>{0.0, 0.0, 0.0});
             }
         }
-        if (want_ne) {
-            field(6);
-            Handle ds(W.data(mp + "/n_e", dims, buf.data()), H5Dclose, "n_e");
+        for (int c = 6; c < 8; ++c) {
+            if (!(c == 6 ? want_ne : want_ni)) continue;
+            field(c);
+            const char* nm = c == 6 ? "n_e" : "n_i";
+            Handle ds(W.data(mp + "/" + nm, dims, buf.data()), H5Dclose, nm);
             meshAttrs(ds, unitDim(-3, 0, 0, 0));
             Writer::attr(ds, "unitSI", cfg.nc);
             Writer::attr(ds, "position", std::vector<double>{0.0, 0.0, 0.0});
@@ -392,7 +248,8 @@ void Simulation::write_openpmd(const Config::OutGroup& g, bool fields, bool beam
             for (size_t n = 0; n < zz.size(); ++n)
                 for (int j = 0; j < ny; ++j)
                     for (int i = 0; i < nx; ++i)
-                        buf[(n * ny + j) * nx + i] = c < 6 ? full[c][(n * xs_ * ny + j) * nx + i] : -rh[(n * xs_ * ny + j) * nx + i];
+                        buf[(n * ny + j) * nx + i] = c < 6 ? full[c][(n * xs_ * ny + j) * nx + i]
+                                                     : c == 6 ? -rh[(n * xs_ * ny + j) * nx + i] : rhi[(n * xs_ * ny + j) * nx + i];
             Handle ds(W.data(mp + "/" + nm, {hsize_t(zz.size()), hsize_t(ny), hsize_t(nx)}, buf.data()), H5Dclose, nm);
             Writer::attr(ds, "geometry", std::string("other"));
             Writer::attr(ds, "geometryParameters", std::string("cartesian"));
@@ -412,6 +269,7 @@ void Simulation::write_openpmd(const Config::OutGroup& g, bool fields, bool beam
         for (int c = 0; c < 6; ++c)
             if (comps >> c & 1) native(nn[c], c, c < 3 ? unitDim(1, 1, -3, -1) : unitDim(0, 1, -2, -1), c < 3 ? E0 : B0);
         if (want_ne) native("native_n_e", 6, unitDim(-3, 0, 0, 0), cfg.nc);
+        if (want_ni) native("native_n_i", 7, unitDim(-3, 0, 0, 0), cfg.nc);
     }
 
     // ---- particles
@@ -419,13 +277,14 @@ void Simulation::write_openpmd(const Config::OutGroup& g, bool fields, bool beam
         const std::string pp = base + "/particles";
         { Handle h(W.groups(pp), H5Gclose, pp); }
         const double Wsi = cfg.nc * L * L * L;                  // real particles per unit of w
-        for (int sp = 0; sp < 2; ++sp) {
+        const std::vector<std::string> names = cfg.beam_names();
+        for (int sp = 0; sp < int(names.size()); ++sp) {
             std::vector<const Particle*> ps;
-            if (!(g.beams >> sp & 1)) continue;
+            if (!(g.beams & cfg.beam_bit(sp))) continue;
             long cnt = 0;
-            for (const auto& p : P) if ((sp == 0) == (p.sp == SP_BUNCH) && cnt++ % g.particle_stride == 0) ps.push_back(&p);
-            if (sp == 1 && ps.empty()) continue;
-            const std::string sg = pp + (sp == 0 ? "/bunch" : "/trapped");
+            for (const auto& p : P) if (cfg.beam_index(p.sp) == sp && cnt++ % g.particle_stride == 0) ps.push_back(&p);
+            if (sp >= 1 && ps.empty()) continue;
+            const std::string sg = pp + "/" + names[sp];
             { Handle h(W.groups(sg), H5Gclose, sg); }
             const hsize_t np = ps.size();
             std::vector<double> col(np);
@@ -478,7 +337,7 @@ void Simulation::write_openpmd(const Config::OutGroup& g, bool fields, bool beam
                 Writer::attr(h, "shape", std::vector<unsigned long long>{np});
                 Writer::attr(h, "unitSI", 1.0);
             };
-            constRecord("charge", unitDim(0, 0, 1, 1), -QE);
+            constRecord("charge", unitDim(0, 0, 1, 1), (np ? ps[0]->q : -1.0) * QE);
             constRecord("mass", unitDim(0, 1, 0, 0), ME);
             {   // one particle patch with the bounding box (lab z = zeta + s)
                 double lo[3] = {0, 0, 0}, hi[3] = {0, 0, 0};

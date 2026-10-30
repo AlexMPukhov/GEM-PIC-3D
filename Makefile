@@ -4,9 +4,10 @@
 # make EMU=1           GPU code paths on the CPU (src/emu: CUDA runtime and cuFFT emulated, device memory
 #                      protected outside kernels); combine with MPI=1
 # make FFTW=1          CPU build with FFTW 3 instead of the own FFT (-lfftw3 -lfftw3_omp)
+# make physics         larger physics checks (ion collapse), minutes on a GPU or a 24-core node
 # make HDF5=1          openPMD output (output.format = openpmd) with HDF5 (pkg-config hdf5); combine with the others
-SIM = src/sim_config.cpp src/sim_setup.cpp src/sim_particles.cpp src/sim_fields.cpp src/sim_plasma.cpp src/sim_output.cpp
-SRC = src/deck.cpp src/grid.cpp $(SIM) src/comm.cpp src/openpmd.cpp
+SIM = src/sim_config.cpp src/sim_setup.cpp src/sim_particles.cpp src/sim_fields.cpp src/sim_plasma.cpp src/sim_ions.cpp src/sim_bunches.cpp src/sim_output.cpp
+SRC = src/deck.cpp src/grid.cpp $(SIM) src/comm.cpp src/openpmd.cpp src/atomic_data.cpp src/ionization.cpp
 HDR = $(wildcard src/*.hpp src/emu/*.h)
 BUILD ?= build
 ifeq ($(CUDA),1)
@@ -47,16 +48,22 @@ all: $(BUILD)/gempic3d $(BUILD)/tests
 $(BUILD)/gempic3d: $(SRC) src/main.cpp $(HDR)
 	@mkdir -p $(BUILD)
 	$(CXX) $(CXXFLAGS) -o $@ $(SRC) src/main.cpp $(LDLIBS)
-TESTS = tests/tests.cpp tests/test_fields.cpp tests/test_bunch.cpp tests/test_plasma.cpp
+TESTS = tests/tests.cpp tests/test_fields.cpp tests/test_bunch.cpp tests/test_plasma.cpp tests/test_ions.cpp tests/test_ionization.cpp tests/test_bunches.cpp
 $(BUILD)/tests: $(SRC) $(TESTS) tests/test_util.hpp $(HDR)
 	@mkdir -p $(BUILD)
 	$(CXX) $(CXXFLAGS) -Isrc -o $@ $(SRC) $(TESTS) $(LDLIBS)
 test: $(BUILD)/tests
 	$(BUILD)/tests
+TESTSRC = $(filter-out tests/tests.cpp,$(TESTS))
+$(BUILD)/physics: $(SRC) $(TESTSRC) tests/physics.cpp tests/test_util.hpp $(HDR)
+	@mkdir -p $(BUILD)
+	$(CXX) $(CXXFLAGS) -Isrc -o $@ $(SRC) $(TESTSRC) tests/physics.cpp $(LDLIBS)
+physics: $(BUILD)/physics
+	$(BUILD)/physics
 emu-selftest: tests/emu_selftest.cpp $(HDR)
 	@mkdir -p $(BUILD)
 	$(CXX) $(CXXFLAGS) -Isrc -o $(BUILD)/emu_selftest tests/emu_selftest.cpp
 	$(BUILD)/emu_selftest
 clean:
 	rm -rf build build-mpi build-gpu build-emu build-fftw build-h5
-.PHONY: all test emu-selftest clean
+.PHONY: all test physics emu-selftest clean

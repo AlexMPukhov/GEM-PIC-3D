@@ -43,7 +43,7 @@ NSTEPS_RE = re.compile(r"\((\d+) steps to z_end\)")
 OUTPUT_RE = re.compile(r"^\s*output: dir '([^']*)', every (\d+) steps")
 FRAME_RE = re.compile(r"^frame_(\d+)\.bin$")
 SIGNED = {"ex", "ey", "ez", "bx", "by", "bz"}          # diverging colour map; densities sequential
-FIELDS = ["ex", "ey", "ez", "bx", "by", "bz", "ne"]
+FIELDS = ["ex", "ey", "ez", "bx", "by", "bz", "ne", "ni"]
 DIAG_COLS = ["step", "z_mm", "N", "x_um", "y_um", "zeta_um", "sig_x_um", "sig_y_um", "sig_z_um", "px", "py", "pz",
              "gamma", "p_khat", "rms_pz", "eta_rel", "a_env", "W_field_J", "W_kin_J", "N_trapped", "Q_trapped_pC"]
 

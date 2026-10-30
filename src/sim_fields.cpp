@@ -315,3 +315,54 @@ void Simulation::solve_fields(double D) {
     par_for(n, [=] HD(long i) { a0[i] = a1[i]; b0[i] = b1[i]; });
     device_sync();
 }
+
+// a Gaussian laser pulse on the grid: R = 2 E_perp of a paraxial beam (complex beam parameter), focus at z_focus
+void Simulation::add_grid_lasers() {
+    if (cfg.glasers.empty()) return;
+    const int nx = cfg.nx, ny = cfg.ny;
+    const size_t pl = size_t(nk);
+    std::vector<cpx> pk(pl);
+    for (const auto& Lz : cfg.glasers) {
+        const double amp = Lz.a0 * Lz.kL;                       // field in m c omega0 / e
+        const double zR = 0.5 * Lz.kL * Lz.waist * Lz.waist;
+        const std::complex<double> qb(1.0, (0.0 - Lz.z_focus) / zR);
+        const std::complex<double> rot(std::cos(Lz.pol_angle), std::sin(Lz.pol_angle));
+        for (int n = a; n < b; ++n) {
+            const double d = cfg.zeta[n] - Lz.zeta_c;
+            const double env = std::exp(-2 * std::log(2.0) * d * d / (Lz.tau * Lz.tau));
+            if (env < 1e-12) continue;
+            const std::complex<double> car = std::exp(std::complex<double>(0, Lz.kL * d + Lz.cep));
+            auto field = [&](double xp, double yp, double& ex, double& ey) {
+                const std::complex<double> E = amp * env * std::exp(-(xp * xp + yp * yp) / (Lz.waist * Lz.waist) / qb) / qb * car;
+                if (Lz.circular) { ex = E.real(); ey = Lz.helicity * E.imag(); }
+                else { ex = E.real() * rot.real(); ey = E.real() * rot.imag(); }
+            };
+            for (int j = 0; j < ny; ++j)
+                for (int i = 0; i < nx; ++i) {
+                    const double xp = i * dx + X0;
+                    double ex, ey, ex2, ey2;
+                    if (yf) {
+                        field(xp, j * dy + Y0, ex, ey);
+                        pk[size_t(j) * nx + i] = C(2 * ex, 2 * ey);                         // R_x + i R_y
+                    } else {                                                           // R_x on nodes, R_y on half-nodes
+                        field(xp, cfg.ynode[j], ex, ey);
+                        field(xp, 0.5 * (cfg.ynode[j] + cfg.ynode[j + 1]), ex2, ey2);
+                        pk[size_t(j) * nx + i] = C(j == 0 ? 0.0 : 2 * ex, 2 * ey2);
+                    }
+                }
+            sp3.from_host(pk.data(), 0, pl);
+            cpx* t = sp3.data();
+            fft_->run(t, 1, false);
+            const long l = n - a, nkk = nk;
+            cpx* rx = Rx.data() + l * nkk; cpx* ry = Ry.data() + l * nkk;
+            const bool yfo = yf;
+            par_for(nk, [=] HD(long idx) {
+                const int ixx = int(idx % nx), j = int(idx / nx);
+                const long m = yfo ? long((ny - j) % ny) * nx + (nx - ixx) % nx : idx - ixx + (nx - ixx) % nx;
+                const cpx z = t[idx], zm = conj(t[m]);
+                rx[idx] = rx[idx] + 0.5 * (z + zm); ry[idx] = ry[idx] + 0.5 * C((z - zm).im, -(z - zm).re);
+            });
+            device_sync();
+        }
+    }
+}

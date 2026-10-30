@@ -5,11 +5,12 @@
 void Simulation::diagnostics(FILE* f, bool header) {
     if (header && comm.rank == 0)
         for (FILE* out : {f, stdout}) if (out) std::fprintf(out, "# step  z[mm]  N_alive  <x>[um] <y>[um] <zeta>[um]  rms_x rms_y rms_zeta[um]  <px> <py> <pz> <gamma> "
-                        "<p.khat>  rms_pz  eta_rel[FWHM] a_env  W_field[J] W_kin[J]  N_trapped Q_trapped[pC]\n");
+                        "<p.khat>  rms_pz  eta_rel[FWHM] a_env  W_field[J] W_kin[J]  N_trapped Q_trapped[pC]%s\n",
+                        cfg.mobile_ions() ? "  max_Zni/n0(axis)" : "");
     double S[19] = {0};
     for (auto& p : host_particles()) {
         if (p.alive != 1) continue;
-        if (p.sp != SP_BUNCH) { S[17] += 1; S[18] += p.q * p.w; continue; }   // trapped plasma electrons
+        if (!is_bunch(p.sp)) { S[17] += 1; S[18] += p.q * p.w; continue; }   // trapped plasma electrons
         const double g = std::sqrt(1 + p.px * p.px + p.py * p.py + p.pz * p.pz);
         const double X = p.x + X0, Y = p.y + Y0;
         const double et = laser.eta(X, s, s - (p.zeta - cfg.zeta_center));
@@ -32,12 +33,20 @@ void Simulation::diagnostics(FILE* f, bool header) {
     const double aenv = laser.on ? laser.a0 * laser.envelope(m(13)) : 0;
     const double Efield = me_SI * c_SI * c_SI / (cfg.Lu * e_SI);
     const double Wf = field_energy * eps0 * Efield * Efield * std::pow(cfg.Lu, 3);
-    const double Wk = S[14] * W_macro_ne * (m(10) - 1) * me_SI * c_SI * c_SI;
+    const double Wk = (S[10] - S[0]) * cfg.nc * std::pow(cfg.Lu, 3) * me_SI * c_SI * c_SI;   // sum of w (gamma - 1)
     const double Qtr = S[18] * cfg.nc * std::pow(cfg.Lu, 3) * e_SI * 1e12;
     char line[600];
     std::snprintf(line, sizeof line, "%6ld %10.5f %8ld %10.4f %10.4f %10.4f %9.4f %9.4f %9.4f %12.6e %12.6e %14.8e %14.8e %14.8e %11.4e %8.4f %8.4f %11.4e %11.4e %8ld %11.4e\n",
                  istep, s * cfg.Lu * 1e3, long(S[14]), m(1) * um, m(2) * um, m(3) * um, rms(1, 4) * um, rms(2, 5) * um,
                  rms(3, 6) * um, m(7), m(8), m(9), m(10), m(11), rms(9, 12), eta_rel, aenv, Wf, Wk, long(S[17]), Qtr);
+    if (rho_lines_i.size()) {             // largest mobile-ion charge density on the axis (ion collapse)
+        const std::vector<double> rl = rho_lines_i.host();
+        const int nx = cfg.nx, i0 = ((int(std::lround(-X0 / dx)) % nx) + nx) % nx;
+        double mx = 0;
+        for (int n = 0; n + 1 < N; ++n) mx = std::max(mx, rl[size_t(n) * (nx + cfg.ny) + i0] / cfg.n0);
+        const size_t l = std::strlen(line);
+        std::snprintf(line + l - 1, sizeof line - l + 1, " %11.4e\n", mx);
+    }
     for (FILE* out : {f, stdout}) if (out) { std::fputs(line, out); std::fflush(out); }
 }
 
@@ -135,6 +144,8 @@ void Simulation::write_frame(const std::string& file, int comps) {
             hl += std::string(hl.empty() ? "" : ", ") + (!yf && is_half(c) ? "true" : "false");
         }
     if (dens) { cl += std::string(cl.empty() ? "" : ", ") + "\"ne\""; hl += std::string(hl.empty() ? "" : ", ") + "false"; }
+    const bool idens = rho_lines_i.size() && (comps >> 7 & 1);
+    if (idens) { cl += std::string(cl.empty() ? "" : ", ") + "\"ni\""; hl += std::string(hl.empty() ? "" : ", ") + "false"; }
     h += ", \"zeta_um\": " + arr(zeta) + ", \"x_um\": " + arr(xs) + ", \"y_um\": " + arr(yn) + ", \"y_half_um\": " + arr(yh) +
          ", \"comps\": [" + cl + "], \"half\": [" + hl + "], \"n0\": " + std::to_string(cfg.n0) +
          ", \"lambda0_um\": " + std::to_string(cfg.lambda0 * 1e6) + "}\n";
@@ -150,12 +161,13 @@ void Simulation::write_frame(const std::string& file, int comps) {
         for (int n = 0; n < N; ++n) for (int j = 0; j < ny; ++j) buf[size_t(n) * ny + j] = A[(size_t(n) * ncomp + c) * (nx + ny) + nx + j];
         std::fwrite(buf.data(), sizeof(float), size_t(N) * ny, f);
     }
-    if (dens) {                                          // n_e / n0 at the slices: mean of the adjacent half-cells
-        const std::vector<double> rl = rho_lines.host();
+    for (int sgn = 0; sgn < 2; ++sgn) {                  // n_e / n0, Z n_i / n0 at the slices: mean of the half-cells
+        if (!(sgn ? idens : dens)) continue;
+        const std::vector<double> rl = (sgn ? rho_lines_i : rho_lines).host();
         const int L = nx + ny;
         auto at = [&](int n, int k) {
             const double lo = n > 0 ? rl[size_t(n - 1) * L + k] : 0, hi = n < N - 1 ? rl[size_t(n) * L + k] : 0;
-            return float(-0.5 * (lo + hi) / cfg.n0);
+            return float((sgn ? 0.5 : -0.5) * (lo + hi) / cfg.n0);
         };
         for (int n = 0; n < N; ++n) for (int i = 0; i < nx; ++i) buf[size_t(n) * nx + i] = at(n, i);
         std::fwrite(buf.data(), sizeof(float), size_t(N) * nx, f);
@@ -168,7 +180,8 @@ void Simulation::write_frame(const std::string& file, int comps) {
 
 // axis_NNNNNN.txt (axis = true in an output group): one line per slice on the axis x = 0, y = 0: zeta [um], E_z,
 // E_x - B_y and E_y + B_x (the transverse force on an electron moving at c along z, per -e), in code units
-// m c omega0 / e, and with plasma n_e/n0. Free-hand y: E_y, B_x are averaged from the half-nodes to y = 0.
+// m c omega0 / e, and with plasma n_e/n0 (and Z n_i/n0 of the mobile ions). Free-hand y: E_y, B_x are averaged
+// from the half-nodes to y = 0.
 void Simulation::write_axis(const std::string& file) {
     const int nx = cfg.nx, ny = cfg.ny;
     const int i0 = ((int(std::lround(-X0 / dx)) % nx) + nx) % nx;
@@ -186,18 +199,23 @@ void Simulation::write_axis(const std::string& file) {
     std::vector<char> all = comm.gather_bytes(mine.data(), mine.size() * sizeof(double));
     if (comm.rank != 0) return;
     const double* A = reinterpret_cast<const double*>(all.data());
-    std::vector<double> rl;
+    std::vector<double> rl, rli;
     if (cfg.plasma_on) rl = rho_lines.host();
+    if (rho_lines_i.size()) rli = rho_lines_i.host();
     const int L = nx + ny;
     FILE* f = std::fopen(file.c_str(), "w");
     if (!f) throw std::runtime_error("cannot write " + file);
     std::fprintf(f, "# GEM-PIC-3D axis x = 0, y = 0, step %ld, z = %.9g mm; fields in m c omega0 / e\n", istep, s * cfg.Lu * 1e3);
-    std::fprintf(f, "# zeta_um Ez Ex-By Ey+Bx%s\n", cfg.plasma_on ? " ne/n0" : "");
+    std::fprintf(f, "# zeta_um Ez Ex-By Ey+Bx%s%s\n", cfg.plasma_on ? " ne/n0" : "", rli.empty() ? "" : " Zni/n0");
     for (int n = 0; n < N; ++n) {
         std::fprintf(f, "%.10g %.10e %.10e %.10e", cfg.zeta[n] * cfg.Lu * 1e6, A[3 * n], A[3 * n + 1], A[3 * n + 2]);
         if (cfg.plasma_on) {
             const double lo = n > 0 ? rl[size_t(n - 1) * L + i0] : 0, hi = n < N - 1 ? rl[size_t(n) * L + i0] : 0;
             std::fprintf(f, " %.10e", -0.5 * (lo + hi) / cfg.n0);
+        }
+        if (!rli.empty()) {
+            const double lo = n > 0 ? rli[size_t(n - 1) * L + i0] : 0, hi = n < N - 1 ? rli[size_t(n) * L + i0] : 0;
+            std::fprintf(f, " %.10e", 0.5 * (lo + hi) / cfg.n0);
         }
         std::fprintf(f, "\n");
     }
@@ -209,7 +227,7 @@ void Simulation::write_beams_native(const Config::OutGroup& g) {
     std::vector<double> mine;
     for (const auto& p : host_particles()) {
         if (p.alive != 1) continue;
-        mine.push_back(p.sp == SP_BUNCH ? 0 : 1);
+        mine.push_back(cfg.beam_index(p.sp));
         for (double v : {p.x + X0, p.y + Y0, p.zeta, p.px, p.py, p.pz, p.w}) mine.push_back(v);
     }
     std::vector<char> all = comm.gather_bytes(mine.data(), mine.size() * sizeof(double));
@@ -217,12 +235,14 @@ void Simulation::write_beams_native(const Config::OutGroup& g) {
     const double* A = reinterpret_cast<const double*>(all.data());
     const size_t n = all.size() / sizeof(double) / 8;
     const double um = cfg.Lu * 1e6, W = cfg.nc * std::pow(cfg.Lu, 3);
-    const char* nm[2] = {"bunch", "trapped"};
-    for (int sp = 0; sp < 2; ++sp) {
-        if (!(g.beams >> sp & 1)) continue;
-        if (sp == 1 && !cfg.plasma_on) continue;
-        char fn[96];
-        std::snprintf(fn, sizeof fn, "/beam_%s_%06ld.txt", nm[sp], istep);
+    const std::vector<std::string> nm = cfg.beam_names();
+    for (int sp = 0; sp < int(nm.size()); ++sp) {
+        const int nb = cfg.nbunch();
+        if (!(g.beams & cfg.beam_bit(sp))) continue;
+        if (sp == nb && !cfg.plasma_on) continue;
+        if (sp > nb && !cfg.ions[sp - nb - 1].ionization) continue;
+        char fn[160];
+        std::snprintf(fn, sizeof fn, "/beam_%s_%06ld.txt", nm[sp].c_str(), istep);
         FILE* f = std::fopen((g.dir + fn).c_str(), "w");
         if (!f) throw std::runtime_error("cannot write " + g.dir + fn);
         std::fprintf(f, "# x_um y_um zeta_um px py pz w(real particles)  step %ld z = %.9g mm\n", istep, s * cfg.Lu * 1e3);

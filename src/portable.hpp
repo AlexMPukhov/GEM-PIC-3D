@@ -86,6 +86,19 @@ HD inline void atomic_add(double* p, double v) {
     *p += v;
 #endif
 }
+// returns the old value of *p and increments it (a slot in a shared list)
+HD inline int atomic_inc(int* p) {
+#if defined(__CUDA_ARCH__)
+    return atomicAdd(p, 1);
+#elif defined(_OPENMP)
+    int v;
+#pragma omp atomic capture
+    v = (*p)++;
+    return v;
+#else
+    return (*p)++;
+#endif
+}
 
 // ---------------------------------------------------------------- device buffer
 template <class T> class Buf {

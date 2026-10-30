@@ -32,6 +32,8 @@ int main(int argc, char** argv) {
             FILE* f = comm.rank == 0 ? std::fopen((c.dir + "/diag.txt").c_str(), "w") : nullptr;
             if (comm.rank == 0 && !f) throw std::runtime_error("cannot write " + c.dir + "/diag.txt");
             sim.diagnostics(f, true);
+            FILE* fi = comm.rank == 0 && c.ionizing() ? std::fopen((c.dir + "/ionization.txt").c_str(), "w") : nullptr;
+            sim.write_ionization(fi, true);
             char fn[64];
             // diag.txt and GUI frames every output.every steps (0: start and end only); output groups at their own periods
             auto frame = [&]() {
@@ -43,6 +45,7 @@ int main(int argc, char** argv) {
             auto t0 = std::chrono::steady_clock::now();
             while (!sim.finished()) {
                 sim.step();
+                sim.write_ionization(fi, false);
                 if (c.every > 0 && sim.istep % c.every == 0) { sim.diagnostics(f, false); frame(); }
                 sim.write_outputs(false);
             }
@@ -50,6 +53,7 @@ int main(int argc, char** argv) {
             if (c.dump_particles) sim.dump_particles(c.dir + "/particles_end.txt");
             if (comm.rank == 0) {
                 std::fclose(f);
+                if (fi) std::fclose(fi);
                 const double sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
                 std::printf("done: %ld steps, %.1f s\n", sim.istep, sec);
             }

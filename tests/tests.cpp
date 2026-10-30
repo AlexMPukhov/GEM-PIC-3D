@@ -24,6 +24,11 @@ int main(int argc, char** argv) {
     test_plasma_wake_beam();
     test_smoothing_divergence();
     test_streaming_kinematics();
+    test_ions_immobile();
+    test_ions_neutral();
+    test_adk_rate();
+    test_field_ionization();
+    test_bunches();
     std::printf("%s: %d failure(s)\n", failures ? "FAILED" : "ALL PASSED", failures);
     comm.finalize();
     return failures ? 1 : 0;

@@ -1,0 +1,59 @@
+# Ionization injection in a laser wakefield (3D, Fourier transverse): the plasma of examples/lwfa_plasma.deck
+# with 1 % nitrogen. N5+ (its K-shell electrons at 552 and 667 eV) is field-ionized near the peak of the a0 = 2
+# pulse, inside the bubble; trapped electrons are written as inj_N5+ (beam files, openPMD) and counted in
+# diag.txt; ionization.txt gives the charge states of the nitrogen leaving the window.
+#   laser: lambda = 0.8 um, w0 = 12 um, 25 fs FWHM (intensity), focus at z = 0.5 mm
+#   plasma: 3.5e18 cm^-3 after a 100 um up-ramp; He2+ background, N5+ with n_N = 3.5e16 cm^-3, ADK ionization
+
+grid {
+  lambda0       = 0.8 um
+  nx            = 64
+  ny            = 64
+  Lx            = 80 um
+  Ly            = 80 um
+  sponge        = 8 um
+  nzeta         = 1201          # dzeta = 0.05 um: 16 points per wavelength
+  window_length = 60 um
+  dz            = 4 um          # field step along z (no Courant limit)
+  z_end         = 1 mm
+  move_x        = false
+  move_y        = false
+}
+
+laser {
+  type          = gaussian
+  a0            = 2
+  waist         = 12 um
+  tau_fwhm      = 25 fs
+  zeta_center   = 48 um
+  z_focus       = 0.5 mm
+  polarization  = linear
+}
+
+plasma {
+  density       = 3.5e18 cm^-3
+  z_points      = 0, 100 um
+  z_values      = 0, 1
+  ppc_x         = 2
+  ppc_y         = 2
+  r_max         = 30 um
+  smooth_length = 0.25 um       # bubble closure (as plasma.smooth_length in GEM-PIC-RZ)
+}
+
+ion {
+  element      = N
+  charge_state = 5
+  density      = 3.5e16 cm^-3     # 5 n_N = 5 % of the electrons; the rest of the positive charge is a background
+  ionization   = adk              # N5+ -> N6+ -> N7+ (NIST energies)
+  mobile       = false            # heavy: fixed atoms, still ionized
+}
+
+numerics {
+  iterations = 2
+}
+
+output {
+  dir        = injection
+  beam_every = 25
+  every = 25
+}

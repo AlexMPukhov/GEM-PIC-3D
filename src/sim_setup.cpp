@@ -53,6 +53,7 @@ Simulation::Simulation(const Config& c, Comm& cm) : cfg(c), comm(cm) {
     laser.pol = cfg.pol == "s" ? 0 : cfg.pol == "p" ? 1 : 2;
     laser.eta_c = cfg.start_fwhm * cfg.tau;   // the bunch centre starts at eta = 0
     setup_plasma();
+    setup_ions();
 }
 
 // Fourier y: k_y per iy as for x, all components on the nodes j*dy of the box (physical y = j*dy + Y0).
@@ -170,69 +171,13 @@ void Simulation::set_particles(const std::vector<Particle>& v) {
     parts.from_host(v.data(), 0, v.size());
 }
 
-// All ranks draw the same bunch; each keeps the particles of its half-cells.
-void Simulation::load_bunch() {
-    using cplx = std::complex<double>;
-    const cplx I(0, 1);
-    std::mt19937_64 rng(cfg.seed);
-    std::normal_distribution<double> G(0, 1);
-    const double Ne = cfg.charge / e_SI;
-    W_macro_ne = cfg.nmacro > 0 ? Ne / cfg.nmacro : 0;
-    const double W = W_macro_ne / (cfg.nc * std::pow(cfg.Lu, 3));     // code weight
-    const double p0 = std::sqrt(cfg.gamma * cfg.gamma - 1);
-    const int M = cfg.noise == "fawley" ? cfg.beamlet : 1;
-    const long nb = cfg.nmacro / M;
-    const int hlo = comm.rank == 0 ? 0 : a + 1, hhi = comm.rank == comm.size - 1 ? N - 2 : b;
-    const double ylo = yf ? -1e300 : cfg.ynode[1], yhi = yf ? 1e300 : cfg.ynode[cfg.ny - 1];
-    const double yoff = yf ? 0.5 * cfg.Ly : 0;        // Fourier y: box coordinate, physical y = p.y + Y0
-    Axis zh = zax; zh.X = cfg.zeta.data();             // host copy of the axis
-    std::vector<Particle> mine;
-    for (long ib = 0; ib < nb; ++ib) {
-        const double x = cfg.sigx * G(rng), y = cfg.sigy * G(rng), z = cfg.sigz * G(rng);
-        const double px = cfg.sigx > 0 ? cfg.emitx / cfg.sigx * G(rng) : 0;
-        const double py = cfg.sigy > 0 ? cfg.emity / cfg.sigy * G(rng) : 0;
-        const double pz = p0 * (1 + cfg.espread * G(rng));
-        std::vector<double> dz(M, 0.0);
-        if (M > 1) {
-            // beamlet: M particles spread evenly over noise_wavelength, displaced so that the bunching at the
-            // harmonics h < M/2 equals that of the real electrons (Fawley, PRST-AB 5, 070701 (2002))
-            const double Neb = Ne / nb, lam = cfg.noise_lambda;
-            const double th0 = 2 * M_PI * std::uniform_real_distribution<double>(0, 1)(rng);
-            std::vector<double> dth(M, 0.0);
-            for (int hh = 1; 2 * hh < M; ++hh) {
-                const cplx bh = std::sqrt(0.5 / Neb) * cplx(G(rng), G(rng));
-                const cplx ch = -2.0 * I * bh / double(hh);
-                for (int j = 0; j < M; ++j) dth[j] += std::real(ch * std::exp(-I * double(hh) * (th0 + 2 * M_PI * j / M)));
-            }
-            for (int j = 0; j < M; ++j) dz[j] = lam * ((th0 + 2 * M_PI * j / M + dth[j]) / (2 * M_PI) - 0.5);
-        }
-        for (int j = 0; j < M; ++j) {
-            const double g = std::sqrt(1 + px * px + py * py + pz * pz);
-            const double vx = px / g, vy = py / g, vz = pz / g;
-            const double zz = z + dz[j];
-            // the particle at (x, y, zz) at t = 0 crosses the plane z = 0 at t = -zz / vz
-            Particle p{};
-            p.x = x - vx * zz / vz + 0.5 * cfg.Lx; p.y = y - vy * zz / vz + yoff;
-            p.zeta = cfg.zeta_center + zz / vz;
-            p.px = px; p.py = py; p.pz = pz; p.w = W; p.alive = 1;
-            p.q = q; p.qm = q; p.sp = SP_BUNCH; p.z = 0;
-            int hc; double f;
-            zh.locate(p.zeta, hc, f);
-            if (p.zeta < 0 || hc > N - 2 || p.y < ylo || p.y > yhi) { if (comm.rank == 0) ++lost_total; continue; }
-            if (hc >= hlo && hc <= hhi) mine.push_back(p);
-        }
-    }
-    set_particles(mine);
-    X0 = -0.5 * cfg.Lx; Y0 = -yoff;
-}
-
 // ---------------------------------------------------------------- time step
 void Simulation::init() {
     load_bunch();
     s = 0; istep = 0;
     if (cfg.self_fields) {
-        currents();
-        comoving_field();
+        if (cfg.nbunch() > 1) comoving_fields_per_bunch();
+        else { currents(); comoving_field(); }
         add_grid_lasers();
         march(0.0);                 // E_z, B_z, L of the co-moving R; the sponge acts as in every step
         sponge_and_real_fields();
@@ -274,7 +219,7 @@ void Simulation::window_shift_post() {
     const Particle* P = parts.data();
     const double x0 = X0, y0 = Y0;
     par_for(np, [=] HD(long i) {
-        if (P[i].alive != 1 || P[i].sp != SP_BUNCH) return;
+        if (P[i].alive != 1 || !is_bunch(P[i].sp)) return;
         atomic_add(&A[0], P[i].w * (P[i].x + x0)); atomic_add(&A[1], P[i].w * (P[i].y + y0)); atomic_add(&A[2], P[i].w);
     });
     device_sync();

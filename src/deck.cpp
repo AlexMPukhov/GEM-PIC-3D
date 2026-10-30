@@ -26,7 +26,7 @@ Deck Deck::read(const std::string& file) {
             if (br == std::string::npos) throw err("expected 'block {'");
             block = trim(line.substr(0, br));
             if (d.blocks_.count(block)) {
-                if (block != "laser") throw err("block '" + block + "' given twice");
+                if (block != "laser" && block != "ion" && block != "bunch") throw err("block '" + block + "' given twice");
                 int k = 2;
                 while (d.blocks_.count(block + std::to_string(k))) ++k;
                 block += std::to_string(k);
@@ -134,7 +134,11 @@ double parse_with_unit(const std::string& text, Kind kind, const std::string& wh
         {"fs", {Kind::Time, 1e-15}}, {"ps", {Kind::Time, 1e-12}}, {"ns", {Kind::Time, 1e-9}},
         {"pC", {Kind::Charge, 1e-12}}, {"nC", {Kind::Charge, 1e-9}},
         {"cm^-3", {Kind::Density, 1e6}}, {"m^-3", {Kind::Density, 1.0}},
-        {"rad", {Kind::Angle, 1.0}}, {"mrad", {Kind::Angle, 1e-3}}, {"deg", {Kind::Angle, M_PI / 180}}};
+        {"rad", {Kind::Angle, 1.0}}, {"mrad", {Kind::Angle, 1e-3}}, {"deg", {Kind::Angle, M_PI / 180}},
+        {"u", {Kind::Mass, 1.66053906660e-27}}, {"m_p", {Kind::Mass, 1.67262192369e-27}},
+        {"m_e", {Kind::Mass, 9.1093837015e-31}}, {"kg", {Kind::Mass, 1.0}},
+        {"eV", {Kind::Energy, 1.0}}, {"keV", {Kind::Energy, 1e3}}, {"MeV", {Kind::Energy, 1e6}},
+        {"GeV", {Kind::Energy, 1e9}}};                                              // energies in eV
     if (unit.empty()) {
         if (kind == Kind::None || kind == Kind::Angle) return v;   // a bare angle is in radians
         throw std::runtime_error(where + ": a unit is required");

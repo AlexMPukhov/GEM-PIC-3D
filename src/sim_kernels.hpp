@@ -89,7 +89,7 @@ HD inline State axpy(const State& a, double h, const State& b) {
 // A particle that enters the half-cells of the rank below (zeta < zhand) at the start of a sub-step is
 // handed over with the rest of the step.
 HD inline void push_one(const PushCtx& c, Particle& p, double z0) {
-    if (c.freeze && p.sp == SP_BUNCH) { p.z = c.s1; return; }   // numerics.freeze_bunch: rigid, (x, y, zeta, p) fixed
+    if (c.freeze && is_bunch(p.sp)) { p.z = c.s1; return; }   // numerics.freeze_bunch: rigid, (x, y, zeta, p) fixed
     State Y{p.x, p.y, p.zeta, p.px, p.py, p.pz};
     double z = z0;
     while (z < c.s1 - 1e-12 * ::fabs(c.s1)) {

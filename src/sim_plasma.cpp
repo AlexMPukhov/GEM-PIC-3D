@@ -36,14 +36,17 @@ struct StreamCtx {
     const double *ia, *id;      // 1/A_j, 1/Delta_j (Fourier y: 1/dy)
     double Delta, s1, sTrap, vz_beam;
     int n;
+    // ions: species constants, ADK levels, the list of electrons freed in this pass (count, capacity), random key
+    const IonDev* ions; const AdkLevel* adk; Particle* born; int* bcnt; int bcap; uint64_t key;
 };
 
-// TSC deposit of q w (dt / Delta) v / (h dx dy) at (x, y) into the half-cell plane (box coordinates)
+// TSC deposit of q w (dt / Delta) v / (h dx dy) at (x, y) into the half-cell plane (box coordinates); the charge
+// goes to plane 3 (negative particles) or 4 (positive: ions, positrons)
 HD inline void stream_deposit(const StreamCtx& c, double x, double y, double f, double vx, double vy, double vz) {
     const PushCtx& P = c.pc;
     int ix_[3], jn[3], jh[3]; double wx[3], wn[3], wh[3];
     tsc(x, P.dx, P.nx, ix_, wx);
-    const long nk = P.nk;
+    const long nk = P.nk, cq = (f < 0 ? 3 : 4) * nk;
     if (P.yf) {
         tsc(y, P.dy, P.ny, jn, wn);
         for (int v = 0; v < 3; ++v)
@@ -51,7 +54,7 @@ HD inline void stream_deposit(const StreamCtx& c, double x, double y, double f, 
                 const long k = long(jn[v]) * P.nx + ix_[u];
                 const double w = f * wx[u] * wn[v] * c.ia[0];
                 atomic_add(&c.J[k], w * vx); atomic_add(&c.J[nk + k], w * vy); atomic_add(&c.J[2 * nk + k], w * vz);
-                atomic_add(&c.J[3 * nk + k], w);
+                atomic_add(&c.J[cq + k], w);
             }
         return;
     }
@@ -62,7 +65,7 @@ HD inline void stream_deposit(const StreamCtx& c, double x, double y, double f, 
             if (nod) {
                 const long k = long(jn[v]) * P.nx + ix_[u];
                 const double w = f * wx[u] * wn[v] * c.ia[jn[v]];
-                atomic_add(&c.J[k], w * vx); atomic_add(&c.J[2 * nk + k], w * vz); atomic_add(&c.J[3 * nk + k], w);
+                atomic_add(&c.J[k], w * vx); atomic_add(&c.J[2 * nk + k], w * vz); atomic_add(&c.J[cq + k], w);
             }
             if (hal) {
                 const long k = long(jh[v]) * P.nx + ix_[u];
@@ -70,6 +73,43 @@ HD inline void stream_deposit(const StreamCtx& c, double x, double y, double f, 
             }
         }
     }
+}
+
+// |E| (grid and analytic laser) at (x, y) at the lab position z and the slice position zeta
+HD inline double field_abs(const StreamCtx& c, double x, double y, double z, double zeta) {
+    const PushCtx& P = c.pc;
+    double E[3], B[3], Ee[3], Be[3];
+    gather(P, ::fmod(::fmod(x, P.Lx) + P.Lx, P.Lx), P.yf ? ::fmod(::fmod(y, P.Ly) + P.Ly, P.Ly) : y, zeta, E, B);
+    P.laser.field(x + P.X0, z, z - (zeta - P.zc), Ee, Be);
+    for (int k = 0; k < 3; ++k) E[k] += Ee[k];
+    return ::sqrt(E[0] * E[0] + E[1] * E[1] + E[2] * E[2]);
+}
+
+// Monte Carlo field ionization of an ion macroparticle during dt (as GEM-PIC-RZ): the ADK rate of its level is
+// averaged over the fields at the two ends of the half-cell, (w(E1) + w(E0))/2, and sequential ionization
+// k -> k+1 -> ... is sampled with exponential waiting times. Each event frees one electron per represented atom,
+// at the ion with its velocity.
+HD inline void ionize(const StreamCtx& c, Particle& p, double E1, double E0, double dt) {
+    const IonDev& I = c.ions[p.sp - SP_ION];
+    if (!I.ionizing || (E1 < I.Emin && E0 < I.Emin)) return;
+    const uint64_t base = ion_key_particle(c.key, p.id);
+    int Z = int(::floor(p.q + 0.5));
+    const int Z0 = Z;
+    unsigned draw = 0;
+    double tleft = dt;
+    while (Z < I.Zmax) {
+        const AdkLevel& L = c.adk[I.off + Z];
+        const double w = 0.5 * (adk_rate(L, E1) + adk_rate(L, E0));
+        if (!(w > 0)) break;
+        const double tw = -::log(1.0 - uniform01(base + draw++)) / w;
+        if (tw > tleft) break;
+        tleft -= tw; ++Z;
+        Particle e = p;
+        e.q = -1; e.qm = -1; e.sp = SP_FREED + (p.sp - SP_ION); e.alive = 1;
+        const int j = atomic_inc(c.bcnt);
+        if (j < c.bcap) c.born[j] = e;
+    }
+    if (Z != Z0) { p.q = Z; p.qm = Z / I.mass; }
 }
 
 // one streaming particle through half-cell n (from its zeta, normally zeta_{n+1}, to zeta_n)
@@ -83,6 +123,16 @@ HD inline void stream_one(const StreamCtx& c, Particle& p) {
     if (p.alive != 1) return;
     const double hl = p.zeta >= zn1 - 1e-9 * h ? h : (p.zeta - zn > 0 ? p.zeta - zn : 0.0);
     const PushCtx& P = c.pc;
+    const bool ion = is_ion(p.sp);
+    if (ion && !c.ions[p.sp - SP_ION].mobile) {     // fixed ion (ionizing): its charge, then the ionization
+        const double f = p.q * p.w * hl / (c.Delta * h * P.dx);
+        if (f != 0) stream_deposit(c, p.x, p.y, f, 0, 0, 0);
+        const double E1 = field_abs(c, p.x, p.y, p.z, p.zeta), E0 = field_abs(c, p.x, p.y, p.z, zn);
+        p.zeta = zn;
+        ionize(c, p, E1, E0, hl);
+        return;
+    }
+    const double zeta0 = p.zeta;
     const double g0 = ::sqrt(1 + p.px * p.px + p.py * p.py + p.pz * p.pz);
     const double omv0 = (1 + p.px * p.px + p.py * p.py) / (g0 * (g0 + p.pz));    // 1 - v_z, no cancellation
     const double dt0 = hl / omv0;
@@ -119,8 +169,10 @@ HD inline void stream_one(const StreamCtx& c, Particle& p) {
     p.zeta = zeta_end;
     // streaming current: q w dt / Delta per unit time, into half-cell n
     const double f = p.q * p.w * dt / (c.Delta * h * P.dx);
-    stream_deposit(c, 0.5 * (xo + p.x), 0.5 * (yo + p.y), f, vx, vy, vz);
+    if (f != 0) stream_deposit(c, 0.5 * (xo + p.x), 0.5 * (yo + p.y), f, vx, vy, vz);
     if (!P.yf && (p.y < P.ylo || p.y > P.yhi)) { p.alive = 0; return; }
+    if (ion && !trapped && c.ions[p.sp - SP_ION].ionizing)
+        ionize(c, p, field_abs(c, xm, ym, zm, zeta0), field_abs(c, xm, ym, zm, zn), dt);
     if (trapped) {
         p.alive = 5;
         const double vze = uz / g1;
@@ -135,11 +187,13 @@ void Simulation::setup_plasma() {
     if (comm.size > 1) throw std::runtime_error("plasma: MPI along zeta is not available with plasma yet (run on one rank)");
     const size_t pl = size_t(nk);
     for (Buf<cpx>* p : {&js0x, &js0y, &js0z}) p->resize((ns + 1) * pl);
-    jsr.resize(4 * pl);
+    jsr.resize(5 * pl);
     rho_lines.resize(size_t(N) * (cfg.nx + cfg.ny));
-    bool ne = false;                             // openPMD n_e: the charge density of every half-cell
-    for (const auto& g : cfg.groups) ne = ne || (g.openpmd && (g.fields >> 6 & 1));
+    if (cfg.mobile_ions()) rho_lines_i.resize(size_t(N) * (cfg.nx + cfg.ny));
+    bool ne = false, ni = false;                 // openPMD n_e, n_i: the charge densities of every half-cell
+    for (const auto& g : cfg.groups) { ne = ne || (g.openpmd && (g.fields >> 6 & 1)); ni = ni || (g.openpmd && (g.fields >> 7 & 1)); }
     if (ne) rho_full.resize(size_t(N - 1) * pl);
+    if (ni && cfg.mobile_ions()) rho_full_i.resize(size_t(N - 1) * pl);
     jsn.resize(3 * pl); jsin.resize(3 * pl); bk.resize(4 * pl); sp3.resize(3 * pl);
     jpred.resize(3 * pl); jtmp.resize(3 * pl); jsi0.resize(3 * pl); dlt.resize(3 * pl);
     if (!yf && scp.size() == 0) {
@@ -148,10 +202,13 @@ void Simulation::setup_plasma() {
     }
 }
 
-// fresh plasma at the front of the window (a regular lattice of ppc_x x ppc_y particles per cell), and the
-// particles that join the march at their zeta
+// fresh plasma at the front of the window (a regular lattice of ppc_x x ppc_y particles per cell; the mobile ions
+// of every ion block at the positions of the electrons: neutral pairs), and the particles that join the march at
+// their zeta
 void Simulation::load_plasma(double s0, double s1, const std::vector<Particle>& joining) {
     std::vector<Particle> v;
+    long cap = 0;                                          // electrons that the ionization can free in this step
+    const unsigned long long id0 = (unsigned long long)(istep + 1) << 32;
     const double zmid = 0.5 * (s0 + s1), Delta = s1 - s0;
     const int nx = cfg.nx, ny = cfg.ny, px = cfg.ppc_x, py = cfg.ppc_y;
     const double zf = cfg.zeta[N - 1];
@@ -173,13 +230,25 @@ void Simulation::load_plasma(double s0, double s1, const std::vector<Particle>& 
                     p.w = n * dx * hy * Delta / (px * py);
                     p.q = -1; p.qm = -1; p.sp = SP_PLASMA; p.alive = 1;
                     p.zeta = zf; p.z = s0;
-                    v.push_back(p);
+                    if (cfg.free_electrons) { p.id = id0 + v.size(); v.push_back(p); }
+                    for (size_t k = 0; k < cfg.ions.size(); ++k) {
+                        const Config::IonSpecies& is = cfg.ions[k];
+                        if (!is.loaded()) continue;
+                        Particle q = p;
+                        q.q = is.Z0; q.qm = is.Z0 / is.mass; q.w = is.atoms * p.w; q.sp = SP_ION + int(k);
+                        q.id = id0 + v.size();
+                        v.push_back(q);
+                        if (is.ionization) cap += is.Zmax - is.Z0;
+                    }
                 }
     }
     fresh_last = long(v.size());
     for (Particle p : joining) { p.alive = 6; v.push_back(p); }
     nstrm = long(v.size());
-    if (strm.size() < v.size()) { strm.resize(v.size() + v.size() / 8 + 64); strm_bk.resize(strm.size()); }
+    born_cap = cap;
+    const size_t need = v.size() + size_t(cap);
+    if (strm.size() < need) { strm.resize(need + need / 8 + 64); strm_bk.resize(strm.size()); }
+    if (cap > 0 && born.size() < size_t(cap)) born.resize(size_t(cap));
     strm.from_host(v.data(), 0, v.size());
 }
 
@@ -358,6 +427,9 @@ void Simulation::march_plasma(double s0, double s1) {
     }
     sc.zs = zs.data(); sc.J = jsr.data(); sc.ia = iA.data(); sc.id = iD.data();
     sc.Delta = Delta; sc.s1 = s1; sc.sTrap = s1 + (cfg.trap_advance - 1) * Delta; sc.vz_beam = cfg.vz_beam;
+    sc.ions = ion_dev.data(); sc.adk = adk_dev.data(); sc.born = born.data(); sc.bcnt = bcnt.data(); sc.bcap = 0; sc.key = 0;
+    const bool ionz = born_cap > 0;
+    const uint64_t key_step = ion_key_step(cfg.seed, istep);
     const int passes = cfg.iterations;
     bool have_dl = false;
     for (int n = N - 2; n >= 0; --n) {
@@ -394,6 +466,11 @@ void Simulation::march_plasma(double s0, double s1) {
             }
             jsr.zero();
             sc.n = n;
+            if (ionz) {                           // electrons freed in this pass (only the last pass counts)
+                bcnt.zero();
+                sc.key = ion_key_slice(key_step, n, pass);
+                sc.bcap = int(std::min<long>(long(born.size()), long(strm.size()) - nstrm));
+            }
             Particle* P = strm.data();
             const StreamCtx scc = sc;
             par_for(nstrm, [=] HD(long i) { stream_one(scc, P[i]); });
@@ -415,15 +492,30 @@ void Simulation::march_plasma(double s0, double s1) {
             march_slice(n, D);
             real_fields_slice(n);
         }
-        {   // electron density of half-cell n on the lines y = 0 and x = 0 (frames)
+        if (ionz) {                               // the freed electrons stream from zeta_n on
+            int cnt = 0;
+            bcnt.to_host(&cnt, 0, 1);
+            if (cnt > sc.bcap) throw std::runtime_error("ionization: list of freed electrons overflowed");
+            Particle* d = strm.data() + nstrm; const Particle* bp = born.data();
+            par_for(cnt, [=] HD(long i) { d[i] = bp[i]; });
+            nstrm += cnt;
+        }
+        {   // electron and ion density of half-cell n on the lines y = 0 and x = 0 (frames)
             const int nx = cfg.nx, ny = cfg.ny;
             const int i0 = ((int(std::lround(-X0 / dx)) % nx) + nx) % nx;
             const int j0 = yf ? ((int(std::lround(-Y0 / dy)) % ny) + ny) % ny : ny / 2;
-            const double* J = jsr.data() + 3 * nkk; double* rl = rho_lines.data() + long(n) * (nx + ny);
-            par_for(nx + ny, [=] HD(long k) { rl[k] = k < nx ? J[long(j0) * nx + k] : J[(k - nx) * nx + i0]; });
-            if (rho_full.size()) {               // and in the whole half-cell (openPMD n_e)
-                float* rf = rho_full.data() + long(n) * nkk;
-                par_for(nk, [=] HD(long i) { rf[i] = float(J[i]); });
+            for (int sgn = 0; sgn < 2; ++sgn) {
+                Buf<double>& lines = sgn ? rho_lines_i : rho_lines;
+                Buf<float>& full = sgn ? rho_full_i : rho_full;
+                const double* J = jsr.data() + (3 + sgn) * nkk;
+                if (lines.size()) {
+                    double* rl = lines.data() + long(n) * (nx + ny);
+                    par_for(nx + ny, [=] HD(long k) { rl[k] = k < nx ? J[long(j0) * nx + k] : J[(k - nx) * nx + i0]; });
+                }
+                if (full.size()) {               // and in the whole half-cell (openPMD n_e, n_i)
+                    float* rf = full.data() + long(n) * nkk;
+                    par_for(nk, [=] HD(long i) { rf[i] = float(J[i]); });
+                }
             }
         }
         {   // half-cell n is final: correct R at slice n+1 for the prediction it used, keep the change for the
@@ -445,11 +537,20 @@ void Simulation::march_plasma(double s0, double s1) {
     std::vector<Particle> sv(static_cast<size_t>(nstrm));
     strm.to_host(sv.data(), 0, sv.size());
     std::vector<Particle> add;
+    for (auto& h : ion_stats) h.clear();
     for (auto& p : sv) {
+        if (is_ion(p.sp) && cfg.ions[p.sp - SP_ION].ionization) {   // charge states leaving the window, freed charge
+            const auto& is = cfg.ions[p.sp - SP_ION];
+            std::vector<double>& h = ion_stats[p.sp - SP_ION];
+            if (h.empty()) h.assign(is.Zmax + 2, 0.0);
+            const int Z = int(std::lround(p.q));
+            if (p.alive == 1) h[Z] += p.w;
+            h[is.Zmax + 1] += (Z - is.Z0) * p.w;
+        }
         if (p.alive != 5) continue;
         const double g = std::sqrt(1 + p.px * p.px + p.py * p.py + p.pz * p.pz);
         p.z = s1;
-        if (p.pz / g >= cfg.vz_beam) { p.alive = 1; p.sp = SP_TRAPPED; add.push_back(p); ++trapped_total; }
+        if (p.pz / g >= cfg.vz_beam) { p.alive = 1; p.sp = trapped_species(p.sp); add.push_back(p); ++trapped_total; }
         else { p.alive = 6; joining_.push_back(p); }
     }
     if (!add.empty()) {
@@ -476,55 +577,4 @@ void Simulation::collect_restreaming() {
         else if (p.alive == 1) keep.push_back(p);
     }
     set_particles(keep);
-}
-
-// a Gaussian laser pulse on the grid: R = 2 E_perp of a paraxial beam (complex beam parameter), focus at z_focus
-void Simulation::add_grid_lasers() {
-    if (cfg.glasers.empty()) return;
-    const int nx = cfg.nx, ny = cfg.ny;
-    const size_t pl = size_t(nk);
-    std::vector<cpx> pk(pl);
-    for (const auto& Lz : cfg.glasers) {
-        const double amp = Lz.a0 * Lz.kL;                       // field in m c omega0 / e
-        const double zR = 0.5 * Lz.kL * Lz.waist * Lz.waist;
-        const std::complex<double> qb(1.0, (0.0 - Lz.z_focus) / zR);
-        const std::complex<double> rot(std::cos(Lz.pol_angle), std::sin(Lz.pol_angle));
-        for (int n = a; n < b; ++n) {
-            const double d = cfg.zeta[n] - Lz.zeta_c;
-            const double env = std::exp(-2 * std::log(2.0) * d * d / (Lz.tau * Lz.tau));
-            if (env < 1e-12) continue;
-            const std::complex<double> car = std::exp(std::complex<double>(0, Lz.kL * d + Lz.cep));
-            auto field = [&](double xp, double yp, double& ex, double& ey) {
-                const std::complex<double> E = amp * env * std::exp(-(xp * xp + yp * yp) / (Lz.waist * Lz.waist) / qb) / qb * car;
-                if (Lz.circular) { ex = E.real(); ey = Lz.helicity * E.imag(); }
-                else { ex = E.real() * rot.real(); ey = E.real() * rot.imag(); }
-            };
-            for (int j = 0; j < ny; ++j)
-                for (int i = 0; i < nx; ++i) {
-                    const double xp = i * dx + X0;
-                    double ex, ey, ex2, ey2;
-                    if (yf) {
-                        field(xp, j * dy + Y0, ex, ey);
-                        pk[size_t(j) * nx + i] = C(2 * ex, 2 * ey);                         // R_x + i R_y
-                    } else {                                                           // R_x on nodes, R_y on half-nodes
-                        field(xp, cfg.ynode[j], ex, ey);
-                        field(xp, 0.5 * (cfg.ynode[j] + cfg.ynode[j + 1]), ex2, ey2);
-                        pk[size_t(j) * nx + i] = C(j == 0 ? 0.0 : 2 * ex, 2 * ey2);
-                    }
-                }
-            sp3.from_host(pk.data(), 0, pl);
-            cpx* t = sp3.data();
-            fft_->run(t, 1, false);
-            const long l = n - a, nkk = nk;
-            cpx* rx = Rx.data() + l * nkk; cpx* ry = Ry.data() + l * nkk;
-            const bool yfo = yf;
-            par_for(nk, [=] HD(long idx) {
-                const int ixx = int(idx % nx), j = int(idx / nx);
-                const long m = yfo ? long((ny - j) % ny) * nx + (nx - ixx) % nx : idx - ixx + (nx - ixx) % nx;
-                const cpx z = t[idx], zm = conj(t[m]);
-                rx[idx] = rx[idx] + 0.5 * (z + zm); ry[idx] = ry[idx] + 0.5 * C((z - zm).im, -(z - zm).re);
-            });
-            device_sync();
-        }
-    }
 }

@@ -178,6 +178,7 @@ Config Config::from_deck(const Deck& d) {
         c.smooth_length = Ld("plasma", "smooth_length", 0.0);
         if (c.smooth_length < 0) throw std::runtime_error("plasma.smooth_length must be >= 0");
     }
+    c.parse_ions(d);
     c.iterations = int(d.integer("numerics", "iterations", 2));
     c.vz_min = d.num("numerics", "vz_min", Kind::None, 0.8);
     c.vz_beam = d.num("numerics", "vz_beam", Kind::None, 0.9);
@@ -192,24 +193,7 @@ Config Config::from_deck(const Deck& d) {
     if (!(c.trap_advance >= 1)) throw std::runtime_error("numerics.trap_advance must be >= 1");
     if ((c.plasma_on || !c.glasers.empty()) && !c.self_fields)
         throw std::runtime_error("numerics.self_fields = false is for test particles in the analytic laser only (no plasma, no grid lasers)");
-    if (d.has_block("bunch")) {
-        c.charge = d.num("bunch", "charge", Kind::Charge);
-        c.gamma = d.num("bunch", "gamma", Kind::None);
-        c.sigx = L("bunch", "sigma_x"); c.sigy = Ld("bunch", "sigma_y", c.sigx); c.sigz = L("bunch", "sigma_z");
-        c.emitx = Ld("bunch", "emittance_x", 0); c.emity = Ld("bunch", "emittance_y", c.emitx);
-        c.espread = d.num("bunch", "energy_spread", Kind::None, 0.0);
-        c.zeta_center = Ld("bunch", "zeta_center", 0.75 * c.Lwin);
-        c.nmacro = d.integer("bunch", "macroparticles", 100000);
-        c.noise = d.str("bunch", "shot_noise", "random");
-        if (c.noise != "random" && c.noise != "fawley") throw std::runtime_error("bunch.shot_noise must be random or fawley");
-        c.noise_lambda = Ld("bunch", "noise_wavelength", 0);
-        c.beamlet = int(d.integer("bunch", "beamlet", 4));
-        c.seed = (unsigned long)d.integer("bunch", "seed", 1);
-        if (c.noise == "fawley" && (c.noise_lambda <= 0 || c.beamlet < 3 || c.nmacro % c.beamlet))
-            throw std::runtime_error("fawley noise: noise_wavelength > 0, beamlet >= 3, macroparticles a multiple of beamlet");
-    } else {
-        c.nmacro = 0; c.charge = 0; c.gamma = 1; c.zeta_center = 0.75 * c.Lwin;
-    }
+    c.parse_bunches(d);
     c.dir = d.str("output", "dir", "out");
     c.every = int(d.integer("output", "every", 10));
     c.dump_particles = d.flag("output", "particles", true);
@@ -228,28 +212,29 @@ Config Config::from_deck(const Deck& d) {
         g.every = int(d.integer(b, "every", main ? 0 : 10));
         g.beam_every = int(d.integer(b, "beam_every", main ? g.every : 0));
         if (g.every < 0 || g.beam_every < 0) throw std::runtime_error(b + ": every and beam_every must be >= 0");
-        static const char* fn[7] = {"ex", "ey", "ez", "bx", "by", "bz", "ne"};
+        static const char* fn[8] = {"ex", "ey", "ez", "bx", "by", "bz", "ne", "ni"};
         const std::string fs = d.str(b, "fields", "all");
-        if (fs == "all") g.fields = 127;
+        if (fs == "all") g.fields = 255;
         else if (fs == "none") g.fields = 0;
         else {
             g.fields = 0;
             for (const auto& w : words(fs)) {
                 int k = 0;
-                while (k < 7 && w != fn[k]) ++k;
-                if (k == 7) throw std::runtime_error(b + ".fields: unknown component '" + w + "' (ex ey ez bx by bz ne, all, none)");
+                while (k < 8 && w != fn[k]) ++k;
+                if (k == 8) throw std::runtime_error(b + ".fields: unknown component '" + w + "' (ex ey ez bx by bz ne ni, all, none)");
                 g.fields |= 1 << k;
             }
         }
         const std::string bs = d.str(b, "beams", "all");
-        if (bs == "all") g.beams = 3;
+        if (bs == "all") g.beams = 7;
         else if (bs == "none") g.beams = 0;
         else {
             g.beams = 0;
             for (const auto& w : words(bs)) {
                 if (w == "bunch") g.beams |= 1;
                 else if (w == "trapped") g.beams |= 2;
-                else throw std::runtime_error(b + ".beams: unknown beam '" + w + "' (bunch trapped, all, none)");
+                else if (w == "injected") g.beams |= 4;
+                else throw std::runtime_error(b + ".beams: unknown beam '" + w + "' (bunch trapped injected, all, none)");
             }
         }
         g.axis = d.flag(b, "axis", false);
@@ -316,8 +301,11 @@ void Config::summary(FILE* f, int ranks) const {
         std::fprintf(f, "  laser: a0 = %g, lambda = %.4g um, angle = %.4g rad, %s, tau_FWHM = %.4g ps, start/stop %.3g/%.3g FWHM\n",
                      a0, lambda0 / kL * 1e6, theta, pol.c_str(), tau * Tu * 1e12, start_fwhm, stop_fwhm);
     else std::fprintf(f, "  laser: off\n");
-    std::fprintf(f, "  bunch: Q = %.4g pC, gamma = %g, sigma = %.3g x %.3g x %.3g um, %ld macroparticles (%s noise)\n",
-                 charge * 1e12, gamma, sigx * um, sigy * um, sigz * um, nmacro, noise.c_str());
+    for (const auto& b : bunch_list())
+        std::fprintf(f, "  bunch %s: %s, Q = %.4g pC, gamma = %g, sigma = %.3g x %.3g um, %s %.3g um, centre zeta = %.4g um, "
+                     "offset %.3g, %.3g um, %ld macroparticles (%s noise)\n", b.name.c_str(), b.q > 0 ? "positrons" : "electrons",
+                     b.charge * 1e12, b.gamma, b.sigx * um, b.sigy * um, b.length > 0 ? "flat-top length" : "sigma_z",
+                     (b.length > 0 ? b.length : b.sigz) * um, b.zeta_center * um, b.x0 * um, b.y0 * um, b.nmacro, b.noise.c_str());
     std::fprintf(f, "  push: RK4 in z, sub-step <= %.3g rad of laser phase\n", push_phase);
     std::fprintf(f, "  parallel: %s, %d MPI rank(s), transverse window lag %d steps\n", GEMPIC_GPU ? "CUDA" : "OpenMP", ranks, window_lag);
     for (size_t k = 0; k < glasers.size(); ++k)
@@ -328,15 +316,20 @@ void Config::summary(FILE* f, int ranks) const {
         std::fprintf(f, "  plasma: n0 = %.4g cm^-3 (%.4g n_c), %s, r_max = %.4g um, %d x %d per cell, smooth_length %.4g um; %d passes per slice, predictor %s, vz_min %.3g, vz_beam %.3g\n",
                      n0 * nc * 1e-6, n0, parabolic ? "parabolic channel" : "uniform", r_max < 1e299 ? r_max * um : -1.0, ppc_x, ppc_y,
                      smooth_length * um, iterations, predictor_extrapolate ? "extrapolate" : "previous", vz_min, vz_beam);
+    for (const auto& s : ions)
+        std::fprintf(f, "  ion %s: M = %.6g m_e, Z0 = %d, n_atom = %.4g n_e, %s%s\n", s.name.c_str(), s.mass, s.Z0, s.atoms,
+                     s.mobile ? "mobile" : s.ionization ? "fixed" : "immobile background",
+                     s.ionization ? (", ADK ionization up to Z = " + std::to_string(s.Zmax)).c_str() : "");
+    if (plasma_on && !free_electrons) std::fprintf(f, "  plasma: no free electrons at the start (neutral gas)\n");
     std::fprintf(f, "  output: dir '%s', every %d steps (%ld steps to z_end)%s\n", dir.c_str(), every,   // read by the GUI
                  long(std::ceil(z_end / dz - 1e-9)), frames ? ", frames" : "");
     for (const auto& g : groups) {
         std::string fl;
-        static const char* fn[7] = {"ex", "ey", "ez", "bx", "by", "bz", "ne"};
-        for (int k = 0; k < 7; ++k) if (g.fields >> k & 1) fl += std::string(fl.empty() ? "" : " ") + fn[k];
+        static const char* fn[8] = {"ex", "ey", "ez", "bx", "by", "bz", "ne", "ni"};
+        for (int k = 0; k < 8; ++k) if (g.fields >> k & 1) fl += std::string(fl.empty() ? "" : " ") + fn[k];
         std::fprintf(f, "    %-10s fields every %d (%s), beams every %d (%s%s%s), %s%s, xi_stride %d, particle_stride %d -> %s\n",
                      g.name.empty() ? "output" : ("diag." + g.name).c_str(), g.every, fl.empty() ? "none" : fl.c_str(), g.beam_every,
-                     g.beams & 1 ? "bunch" : "", g.beams == 3 ? " " : "", g.beams & 2 ? "trapped" : (g.beams ? "" : "none"),
+                     g.beams & 1 ? "bunch" : "", g.beams & 2 ? " trapped" : "", g.beams & 4 ? " injected" : (g.beams ? "" : "none"),
                      g.native && g.openpmd ? "native + openPMD" : g.openpmd ? "openPMD" : "native", g.axis ? ", axis" : "",
                      g.xi_stride, g.particle_stride, g.dir.c_str());
     }

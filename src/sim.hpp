@@ -17,7 +17,19 @@
 #include "deck.hpp"
 #include "fftmany.hpp"
 #include "grid.hpp"
+#include "ionization.hpp"
 #include "portable.hpp"
+
+// an ion species on the device: mass [m_e], mobile, ionizing, highest charge state, offset of its levels in the ADK
+// table, lowest field at which any of its levels ionizes
+struct IonDev { double mass; int mobile, ionizing, Zmax, off; double Emin; };
+
+enum Species { SP_BUNCH = 0, SP_TRAPPED = 1, SP_PLASMA = 2, SP_ION = 3, SP_FREED = 50, SP_INJECTED = 100 };
+HD inline bool is_bunch(int sp) { return sp <= 0; }       // bunch k has sp = -k
+HD inline bool is_ion(int sp) { return sp >= SP_ION && sp < SP_FREED; }
+HD inline bool is_freed(int sp) { return sp >= SP_FREED && sp < SP_INJECTED; }
+// beam-list species after trapping: plasma electrons -> trapped, ionization electrons -> injected
+HD inline int trapped_species(int sp) { return is_freed(sp) ? sp - SP_FREED + SP_INJECTED : sp >= SP_INJECTED ? sp : SP_TRAPPED; }
 
 struct Config {
     double lambda0 = 0, Lu = 0, Tu = 0, nc = 0;       // reference wavelength [m], code length [m], code time [s], n_c [m^-3]
@@ -38,11 +50,24 @@ struct Config {
     double a0 = 0, kL = 1, theta = 0, tau = 1, cep = 0;
     std::string pol = "s";
     double start_fwhm = 3.5, stop_fwhm = 3.5;
+    // the bunch (the first bunch block; the tests set these directly), and all bunch blocks (bunch, bunch2, ...)
     double charge = 0, gamma = 1, sigx = 0, sigy = 0, sigz = 0, emitx = 0, emity = 0, espread = 0;
     double zeta_center = 0;
     long nmacro = 0;
     std::string noise = "random";
     double noise_lambda = 0; int beamlet = 4; unsigned long seed = 1;
+    struct Bunch {
+        std::string name = "bunch";
+        double q = -1;                                  // charge number: -1 electrons, +1 positrons
+        double charge = 0, gamma = 1, sigx = 0, sigy = 0, sigz = 0, length = 0;   // length > 0: flat-top in z
+        double emitx = 0, emity = 0, espread = 0, zeta_center = 0, x0 = 0, y0 = 0;
+        long nmacro = 0;
+        std::string noise = "random";
+        double noise_lambda = 0; int beamlet = 4; unsigned long seed = 1;
+    };
+    std::vector<Bunch> bunches;
+    std::vector<Bunch> bunch_list() const;             // `bunches`, or the single bunch of the fields above
+    void parse_bunches(const Deck& d);                 // sim_bunches.cpp
     // grid lasers (laser blocks with type = gaussian): paraxial Gaussian pulses on the grid
     struct GridLaser {
         double a0 = 1, kL = 1, waist = 10, tau = 10, zeta_c = 0, z_focus = 0, cep = 0, pol_angle = 0;
@@ -60,6 +85,36 @@ struct Config {
     int iterations = 2;
     double vz_min = 0.8, vz_beam = 0.9, trap_advance = 1.0;
     bool predictor_extrapolate = true;                // streaming current of half-cell n-1: s0 + extrapolated change
+    // ion species (blocks ion, ion2, ...): loaded at the positions of the plasma electrons with charge Z0 and
+    // n_atom = atoms n_e (Z0 atoms = fraction); the rest of the positive charge is an immobile background.
+    // Field ionization (ADK): levels Z0 ... Zmax-1 with the energies ip_eV (NIST or ionization_potentials)
+    struct IonSpecies {
+        std::string name;
+        double mass = 1836.15267343;                  // in m_e
+        int Z0 = 1;
+        double atoms = 1;                             // n_atom / n_e of the plasma profile
+        bool mobile = true, ionization = false;
+        int Zmax = 0;
+        std::vector<double> ip_eV;
+        bool loaded() const { return mobile || ionization; }     // as macroparticles (else: background)
+    };
+    std::vector<IonSpecies> ions;
+    bool free_electrons = true;                       // plasma.free_electrons = false: neutral gas
+    bool mobile_ions() const { for (const auto& s : ions) if (s.loaded()) return true; return false; }
+    bool ionizing() const { for (const auto& s : ions) if (s.ionization) return true; return false; }
+    // beam-list species of the output: 0 bunch, 1 trapped, 2 + k inj_<name> (electrons from the ionization of
+    // ion block k); their bit in OutGroup::beams: 1, 2, 4 (all injected species)
+    // (with several bunches: one species per bunch, then trapped, then the injected ones)
+    std::vector<std::string> beam_names() const {
+        std::vector<std::string> v;
+        for (const auto& b : bunch_list()) v.push_back(b.name);
+        v.push_back("trapped");
+        for (const auto& s : ions) v.push_back("inj_" + s.name);
+        return v;
+    }
+    int nbunch() const { return bunches.empty() ? 1 : int(bunches.size()); }
+    int beam_index(int sp) const { return is_bunch(sp) ? -sp : sp >= SP_INJECTED ? nbunch() + 1 + sp - SP_INJECTED : nbunch(); }
+    int beam_bit(int index) const { return index < nbunch() ? 1 : index == nbunch() ? 2 : 4; }
     double plasma_density(double x, double y, double z) const;   // x, y relative to the axis (lab)
     std::string dir = "out";
     int every = 10;
@@ -70,8 +125,8 @@ struct Config {
     struct OutGroup {
         std::string name, dir;               // name "" = main output; dir: <output.dir> or <output.dir>/<name>
         int every = 0, beam_every = 0;       // field and particle output periods (steps; 0 = never)
-        int fields = 127;                    // bits: ex ey ez bx by bz ne
-        int beams = 3;                       // bits: bunch, trapped
+        int fields = 255;                    // bits: ex ey ez bx by bz ne ni
+        int beams = 7;                       // bits: bunch, trapped, injected (inj_<ion name>)
         bool axis = false, native = true, openpmd = false;
         int xi_stride = 1, particle_stride = 1;
         std::string openpmd_file = "openpmd/data_%06T";
@@ -85,6 +140,7 @@ struct Config {
     bool freeze_bunch = false;                         // numerics.freeze_bunch: the bunch is not pushed (rigid source)
 
     static Config from_deck(const Deck& d);
+    void parse_ions(const Deck& d);                   // ion blocks and plasma.free_electrons (sim_ions.cpp)
     static Config base_units(double lambda0);          // units only (used by the tests)
     void summary(FILE* f, int ranks) const;
     // grids (code units): uniform, or a free-hand step table (points >= 0; for y measured from the axis,
@@ -121,14 +177,14 @@ struct Laser {
 
 // w: number of real particles (code units of n_c / k0^3), q: charge number (-1 electron), qm = q / mass (in m_e),
 // z: lab position (beam list: the plane z = s after a push; streaming particles move in z within a level),
-// sp: species (0 bunch, 1 trapped plasma electron, 2 plasma electron streaming).
-struct Particle { double x, y, zeta, px, py, pz, w, rem, z, q, qm; int alive, sp; };
+// sp: species (0 bunch, 1 trapped plasma electron, 2 plasma electron streaming, SP_ION + k ion species k
+// streaming, SP_FREED + k electron freed by the ionization of species k, SP_INJECTED + k such an electron in
+// the beam list), id: key of the random numbers of the ionization.
+struct Particle { double x, y, zeta, px, py, pz, w, rem, z, q, qm; int alive, sp; unsigned long long id; };
 // beam list, alive: 0 lost, 1 own, 2 handed to the rank below during the push (rem = z still to go), 3 adopted,
 // 4 slower than numerics.vz_min: leaves the beam list and streams in the current march from its (z, zeta)
 // streaming list, alive: 1 streaming, 0 lost, 5 trapped (reached the next level), 6 waiting (joins the march at
 // its zeta)
-enum Species { SP_BUNCH = 0, SP_TRAPPED = 1, SP_PLASMA = 2 };
-
 class Simulation {
 public:
     Simulation(const Config& c, Comm& comm);
@@ -138,13 +194,14 @@ public:
     void diagnostics(FILE* f, bool header);        // collective; f is used on rank 0 only
     void dump_particles(const std::string& file);  // collective
     // collective: fields in the planes y = 0 and x = 0 (GUI frames, and the native field files of a group)
-    void write_frame(const std::string& file, int comps = 127);
+    void write_frame(const std::string& file, int comps = 255);
     void write_axis(const std::string& file);       // collective: axis lineouts (axis_NNNNNN.txt)
     // collective: one openPMD file of iteration istep for the group g, with its fields and/or beams
     void write_openpmd(const Config::OutGroup& g, bool fields, bool beams);
     void write_beams_native(const Config::OutGroup& g);   // collective: beam_<species>_NNNNNN.txt
     void write_outputs(bool start);                // collective: the groups due at this step
     Buf<float> rho_full;                     // plasma charge density of every half-cell (openPMD n_e), [N-1][nk]
+    Buf<float> rho_full_i;                   // the same for the mobile ions (openPMD n_i)
 
     // fields of level s1 (march with D = dz/2), or E_z, B_z, L of the stored R (D = 0)
     void solve_fields(double D);
@@ -158,7 +215,7 @@ public:
     double dx = 0, dy = 0, s = 0, X0 = 0, Y0 = 0;     // dy, Y0: Fourier y only (free-hand y: Y0 = 0)
     bool yf = true;                                    // cfg.y_fourier
     long istep = 0;
-    double field_energy = 0, W_macro_ne = 0;
+    double field_energy = 0;
     double beta_b = 1, gm2_b = 0;           // mean beta of the bunch at the start, 1 - beta^2 (bound field of the sponge)
 
     // device arrays of nk-point planes: slice planes l = n - a (0..ns-1); half-cell planes hk = m - (a-1)
@@ -193,10 +250,22 @@ public:
     Buf<Particle> strm, strm_bk;
     long nstrm = 0, fresh_last = 0, trapped_total = 0, restreamed_total = 0;
     Buf<cpx> js0x, js0y, js0z, jsn, jsin, bk, sp3, jpred, jtmp, jsi0, dlt;
-    Buf<double> jsr;                         // jx, jy, jz, rho of one half-cell (real space)
+    Buf<double> jsr;                         // jx, jy, jz, rho_-, rho_+ of one half-cell (real space; charge of the
+                                             // negative and the positive streaming particles)
     Buf<double> rho_lines;                   // electron charge density of the streaming particles on the lines
                                              // y = 0 (nx) and x = 0 (ny) of every half-cell [N][nx + ny]
+    Buf<double> rho_lines_i;                 // the same for the mobile ions (with ion blocks)
     std::vector<Particle> joining_;          // join the next march at their zeta (box coordinates)
+    // ions: per-species constants, ADK levels, electrons freed in a pass (born, count bcnt), per-species weight of
+    // the charge states of the ions leaving the window in the last step and the weight freed (ion_stats[k][Zmax+1])
+    Buf<IonDev> ion_dev;
+    Buf<AdkLevel> adk_dev;
+    Buf<Particle> born;
+    Buf<int> bcnt;
+    long born_cap = 0;
+    std::vector<std::vector<double>> ion_stats;
+    void setup_ions();
+    void write_ionization(FILE* f, bool header);     // ionization.txt (rank 0)
     std::vector<double> cfg_wlo_;            // host copy of wlo
 
     double total_field_energy();          // collective, code units
@@ -206,6 +275,7 @@ public:
     // internal steps (public because nvcc forbids device lambdas in private member functions)
     void load_bunch();
     void comoving_field();
+    void comoving_fields_per_bunch();   // several bunches: each with its own beta, summed (sim_bunches.cpp)
     void push(double s0, double s1, long i0, long i1);
     void exchange_particles(double s1);
     void currents();             // deposit, exchange with the rank below/above, zeta filter, spectra

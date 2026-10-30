@@ -1,0 +1,49 @@
+# Ion collapse inside a dense, ultra-relativistic electron bunch (Rosenzweig et al., PRL 95, 195002 (2005)):
+# n_b = 100 n0, hydrogen. The on-axis ion density Zni/n0 (axis files, diag.txt column max_Zni/n0) rises from 1
+# behind the head of the bunch to ~200 at the collapse. The same case is checked against a test-ion model by
+# make physics (tests/test_ions.cpp). Takes a few seconds on a GPU, minutes on a 24-core node.
+#   lambda0 = 0.8 um: k0^-1 = 0.1273 um; the grid is that of the check: dx = sigma_r / 10, dzeta = 1 k0^-1
+
+grid {
+  lambda0       = 0.8 um
+  nx            = 320
+  ny            = 320
+  Lx            = 10.1859 um      # 80 k0^-1
+  sponge        = 0 um
+  nzeta         = 641
+  window_length = 81.4873 um      # 640 k0^-1
+  dz            = 12.7324 um      # 100 k0^-1
+  z_end         = 38.1972 um      # 3 steps
+  move_x        = false
+  move_y        = false
+}
+
+plasma {
+  density = 0.002 n_c             # 3.48e18 cm^-3
+  ppc_x   = 1
+  ppc_y   = 1
+}
+
+ion {
+  element = H                     # mobile protons, the whole neutralizing charge
+}
+
+bunch {
+  charge         = 907.3 pC       # n_b = 0.2 n_c = 100 n0 at the peak
+  gamma          = 1e5
+  sigma_x        = 0.31831 um     # 2.5 k0^-1
+  sigma_z        = 10.1859 um     # 80 k0^-1
+  zeta_center    = 50.9296 um     # 400 k0^-1
+  macroparticles = 400000
+}
+
+numerics {
+  freeze_bunch = true             # a rigid source
+  k_filter     = false
+}
+
+output {
+  dir   = ion_collapse
+  every = 1
+  axis  = true
+}

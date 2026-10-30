@@ -8,9 +8,9 @@ so the field solve of a slice is a closed-form scalar problem per (k_x, k_y). Op
 finite-difference grid between conducting walls (fine near the bunch, coarse far out); the solve is then
 one tridiagonal system along y per k_x. The ζ grid is uniform or free-hand in either case.
 
-Plasma (stage 1 of the GEM-PIC-RZ physics): streaming plasma electrons with an immobile ion background,
-lasers on the grid, trapping into the beam list and the bubble closure `plasma.smooth_length`; see
-"Plasma". A browser GUI (`tools/gempic3d_gui.py`) edits and runs decks and shows the fields live.
+Plasma (the GEM-PIC-RZ physics): streaming plasma electrons, mobile ions and ADK field ionization with the
+NIST ionization energies, lasers on the grid, trapping into the beam list and the bubble closure
+`plasma.smooth_length`; see "Plasma" and "Ions and field ionization". A browser GUI (`tools/gempic3d_gui.py`) edits and runs decks and shows the fields live.
 
 The first application is a dense electron bunch overtaken at a small angle by a plane-wave laser,
 with the radiation of the bunch resolved on the grid and acting back on it
@@ -20,7 +20,8 @@ with the radiation of the bunch resolved on the grid and acting back on it
 
 ```
 make                      # build/gempic3d and build/tests (C++17, OpenMP, no external libraries)
-make test                 # 68 checks against analytic references, a few minutes on one core
+make test                 # 81 checks against analytic references, a few minutes on one core
+make physics              # ion collapse on a large grid: seconds on a GPU, minutes on a 24-core node
 make MPI=1 BUILD=build-mpi                 # MPI (mpicxx); test: sh tests/mpi.sh build-mpi/gempic3d
 make CUDA=1 CUDA_ARCH=-arch=sm_120 BUILD=build-gpu  # GPU (nvcc, cuFFT; sm_80 A100, sm_90 H100/GH200); add MPI=1 for both
 make EMU=1 BUILD=build-emu test emu-selftest   # the GPU code paths on the CPU (GPU emulator, see Parallelism)
@@ -143,7 +144,8 @@ Stage 1 of the physics of GEM-PIC-RZ, with the same algorithm (`src/sim_plasma.c
 
 - **Plasma block:** `density` (cm^-3 or n_c), a longitudinal profile (`z_points`, `z_values`, linear between
   the points, constant beyond them), uniform or `parabolic` channel (`channel_depth` at `r_channel`), column
-  radius `r_max`, `ppc_x` × `ppc_y` electrons per cell on a regular lattice. The ions are an immobile background.
+  radius `r_max`, `ppc_x` × `ppc_y` electrons per cell on a regular lattice. Without `ion` blocks the ions are an
+  immobile background (see "Ions and field ionization").
 - **Streaming electrons:** fresh plasma is loaded at the front of the window in every step and streams to the
   rear. Per half-cell n, in `numerics.iterations` passes (default 2; 1 is unstable): the electrons are pushed
   from ζ_{n+1} to ζ_n by Boris with dt = h/(1 − v_z) in the fields of slice n+1 (final) and slice n, their
@@ -170,8 +172,53 @@ Stage 1 of the physics of GEM-PIC-RZ, with the same algorithm (`src/sim_plasma.c
   plane wave (`type = plane_wave`, the default) stays as before; it is not changed by the plasma.
 - **Net current:** with plasma the k⊥ = 0 current is kept (a 1D plasma wave, not a net current in a periodic box),
   and the sponge uses the bound field of the beam list only.
-- **Not yet:** MPI (plasma runs on one rank), mobile ions, field ionization, several bunches, external fields
-  and undulators, profiles as expressions and checkpoints (the next stages).
+- **Several bunches** (`bunch`, `bunch2`, …): electrons or positrons (`species`), Gaussian or flat-top, with
+  offsets, each from its own seed (e.g. a drive and a witness bunch). The co-moving initial field
+  −(∇⊥² + γ⁻²∂ζ²)ψ = ρ is solved for each bunch with its own γ and the forward fields are summed. `diag.txt`
+  holds the moments of all bunches together; the beam files and openPMD have one species per bunch name.
+- **Not yet:** MPI with plasma (plasma runs on one rank), external fields and undulators, profiles as
+  expressions and checkpoints (the next stages).
+
+## Ions and field ionization
+
+As in GEM-PIC-RZ (`src/sim_ions.cpp`, `src/ionization.*`, `src/atomic_data.cpp`; deck keys in
+`docs/input_deck.md`, block `ion`):
+
+- **Mobile ions:** every `ion` block is one species, loaded with the fresh plasma at the positions of the plasma
+  electrons (neutral pairs), with charge Z0, q/m = Z0/M and n_atom = fraction·n_e/Z0 (or `density`). The rest of
+  the positive charge is an immobile background, which needs no source term: the field equations take only the
+  currents. The ions stream through the window like the electrons (the same Boris push with their q/m, current
+  q w dt/Δ · v). Each loaded species adds the number of plasma macroparticles.
+- **Densities:** the charge of negative and positive streaming particles is deposited separately; the output has
+  n_e/n0 and the ion charge density Z n_i/n0 (`ni` in the field files and the GUI frames, `n_i` in openPMD,
+  a column `Zni/n0` in `axis_NNNNNN.txt`; `diag.txt` adds its maximum on the axis).
+- **Field ionization** (`ionization = adk`): the ADK tunnel rate of each level (Ammosov, Delone, Krainov 1986;
+  s-state form with l* = n* − 1 as in Chen et al., JCP 236, 220 (2013) and FBPIC)
+
+  w = ω_a C²_{n*} (U/2U_H) [2 (U/U_H)^{3/2} E_a/E]^{2n*−1} exp[−(2/3)(U/U_H)^{3/2} E_a/E],
+  n* = (k+1)(U_H/U)^{1/2}, C²_{n*} = 2^{2n*}/(n* Γ(n*+1) Γ(n*)),
+
+  with the NIST ionization energy U of the level and the instantaneous |E| at the ion (grid fields and the
+  analytic plane wave; the carrier is resolved, so there is no cycle averaging). Beyond the maximum of the
+  expression (barrier suppression) the rate stays at its maximum. Per half-cell the rate is averaged over the
+  fields at its two ends, (w(E_{n+1}) + w(E_n))/2, and sequential ionization k → k+1 → … is sampled with
+  exponential waiting times (Monte Carlo per macroparticle). The random numbers are counter-based (a hash of
+  seed, step, slice, pass and particle), so CPU and GPU draw the same numbers whatever the thread order.
+- **Freed electrons:** each event frees one electron per represented atom at the ion, with its velocity; it
+  streams from the next half-cell on. Trapped ones join the beam list as `inj_<name>` (beam files, openPMD;
+  `beams = injected`). `ionization.txt` gives per step the charge-state distribution of the ions that left the
+  window and the charge freed. `mobile = false` keeps ionizing atoms at rest (heavy dopants);
+  `plasma.free_electrons = false` starts from a neutral gas. The energy taken from the laser by the ionization
+  is neglected (dilute dopants), as in GEM-PIC-RZ.
+- **Elements:** H, D, He, Li, Be, B, C, N, O, F, Ne, Na, Mg, Al, Si, Ar, Cu, Kr, Ag, Xe and Au, with all levels
+  from the NIST Atomic Spectra Database (provenance in `src/atomic_data.cpp`); `ionization_potentials` replaces
+  them.
+
+```
+plasma { density = 3.5e18 cm^-3; ppc_x = 2 }
+ion    { element = N; charge_state = 5; density = 3.5e16 cm^-3; ionization = adk }   # dopant
+ion    { element = He; charge_state = 2; fraction = 0.9 }                              # mobile He2+
+```
 
 ## GUI
 
@@ -258,54 +305,9 @@ times more. The small grids of `make test` take longer on the GPU (2.2 min) than
 
 ## Input deck
 
-| block | key | default | meaning |
-|---|---|---|---|
-| grid | `lambda0` | laser wavelength | reference wavelength (code units) |
-| | `nx`, `Lx` | — | x: modes (any size; 2^a 3^b 5^c 7^d are fast) and period |
-| | `y_grid` | fourier | `fourier`, or `table` for the free-hand y between walls |
-| | `ny`, `Ly` | —, `Lx` | Fourier y: modes (any size) and period |
-| | `y_points`, `dy_points`, `y_max` | — | free-hand y: step `dy_points` at the distances `y_points` from the axis (linear between, constant beyond), mirrored; walls at ±`y_max` |
-| | `zeta_grid` | uniform | `uniform`, or `table` for the free-hand ζ |
-| | `nzeta` | — | uniform ζ: number of slices |
-| | `zeta_points`, `dzeta_points` | — | free-hand ζ: step `dzeta_points` at ζ = `zeta_points` from the rear |
-| | `window_length` | — | length of the ζ window (front at ζ = window_length; a table rounds it up to a whole cell) |
-| | `dz`, `z_end` | — | field step along z, end of the run |
-| | `dz_push` | `dz` | largest particle sub-step |
-| | `sponge`, `sponge_y`, `sponge_rate` | 0.1 min(Lx, Ly), `sponge`, 0.1 | width of the absorbing layer in x and in y, damping per step at the edge |
-| | `move_x`, `move_y` | true, true | the transverse window follows the bunch (`move_y`: Fourier y only) |
-| | `window_lag` | 4 | steps between the centroid and the window shift it causes |
-| laser | `enabled` | true | false: reference run without the laser |
-| | `a0`, `wavelength`, `angle` | —, λ0, 0 | amplitude, wavelength, angle of k to z in the x–z plane |
-| | `polarization` | s | s, p, circular |
-| | `tau_fwhm`, `cep` | —, 0 | intensity FWHM, carrier phase |
-| | `start_fwhm`, `stop_fwhm` | 3.5, = start | the bunch centre starts this many FWHM before the peak; stop this many after it (0: run to z_end) |
-| bunch | `charge`, `gamma`, `energy_spread` | —, —, 0 | |
-| | `sigma_x`, `sigma_y`, `sigma_z` | —, σ_x, — | rms sizes (σ_z in the lab at t = 0) |
-| | `emittance_x`, `emittance_y` | 0, ε_x | normalized rms emittance |
-| | `zeta_center` | 0.75 window | position of the centre in the window |
-| | `macroparticles`, `seed` | 100000, 1 | |
-| | `shot_noise`, `noise_wavelength`, `beamlet` | random, —, 4 | `fawley`: bunching noise of the real electrons at noise_wavelength (Fawley, PRST-AB 5, 070701 (2002)) |
-| numerics | `self_fields` | true | false: test particles in the laser only |
-| | `zeta_filter`, `k_filter` | true, true | current filters |
-| | `push_phase` | 0.05 rad | laser phase per RK4 sub-step |
-| | `type` | plane_wave | `plane_wave` (analytic, above) or `gaussian` (on the grid): `a0`, `wavelength`, `waist`, `tau_fwhm`, `zeta_center`, `z_focus` (0), `cep`, `polarization` (linear, circular), `pol_angle`, `helicity`, `enabled` |
-| plasma | `density` | — | cm^-3 or n_c |
-| | `z_points`, `z_values` | — | longitudinal profile (relative), linear between the points |
-| | `profile`, `channel_depth`, `r_channel` | uniform | `parabolic`: n0 (1 + depth r²/r_channel²) |
-| | `r_max`, `ppc_x`, `ppc_y` | ∞, 2, ppc_x | column radius, electrons per cell |
-| | `smooth_length` | 0 | bubble closure: smoothing length of the plasma currents |
-| numerics | `iterations`, `predictor` | 2, extrapolate | passes per slice; prediction of the streaming current (`previous`: as GEM-PIC-RZ) |
-| | `vz_min`, `vz_beam`, `trap_advance` | 0.8, 0.9, 1 | trapping and return to streaming, as in GEM-PIC-RZ |
-| output | `dir`, `every`, `particles`, `frames` | out, 10, true, false | `every`: period of `diag.txt` and of the main output's fields; `particles`: start/end dumps; `frames`: frame_NNNNN.bin for the GUI |
-| | `fields`, `beam_every`, `beams`, `axis` | all, 0, all, false | main output group (see Output) |
-| | `format`, `xi_stride`, `particle_stride` | native, 1, 1 | `native`, `openpmd` or `both` |
-| | `openpmd_file`, `openpmd_grid`, `openpmd_dy`, `openpmd_dzeta`, `hdf5_single`, `hdf5_compression` | openpmd/data_%06T, uniform, smallest step, true, 0 | openPMD settings |
-| diag | `names` | — | diagnostic groups, each a block `diag.<name>` with the keys of the output group (`every` 0, `beam_every` = every, format and openPMD settings from `output`) |
-
-`diag.txt` has one line per output step: z, the centroid (x, y, ζ), the rms sizes, ⟨p_x⟩, ⟨p_y⟩,
-⟨p_z⟩, ⟨γ⟩, ⟨p·k̂⟩ (along the laser), the rms of p_z, the position of the bunch in the pulse
-(η − η_c in FWHM), the local amplitude a0 g, and the field and kinetic energy in J. `particles_start.txt`
-and `particles_end.txt` hold the macroparticles.
+The keys of all blocks are in [`docs/input_deck.md`](docs/input_deck.md). A deck is a sequence of blocks
+`name { key = value }`; dimensional values need units; unknown keys, missing units and units of the wrong kind are
+errors with file and line. Repeated `laser` and `ion` blocks become `laser2`, `ion2`, … (also for overrides).
 
 ## Output
 
@@ -367,6 +369,11 @@ diag.light {
 | plasma, 3D linear wake of a narrow rigid bunch on the axis after 30 steps against the linear theory of the discrete scheme (plasma frequency k_p S(k) per transverse mode, S = TSC shape); free-hand y against Fourier y | 1.9 %; 1.7 % (the continuum theory differs by 9.7 %: the TSC shape, not an error) |
 | plasma, smoothing commutes with the divergence (free-hand y) | 4e-16 |
 | streaming in vacuum: a fast electron is trapped at ζ0 − (1 − v_z) Δ/v_z and moves on in the beam list; a slow one returns to streaming | 1e-9 |
+| ions: H-like ions of mass 1e15 u against no ions (1D laser wake, a0 = 0.3); neutral pairs H+ / He2+ at rest in a parabolic channel with a ramp: fields, momenta, Z n_i = n_e | 1e-13; 0, 9e-16 |
+| ADK rate of hydrogen-like levels against the Landau rate; code-unit tables against the SI formula | 2e-14; 7e-15 |
+| field ionization in a plane-wave pulse (τ = 30 k0⁻¹, 4096 atoms) against the rate equations with E = −dA/dη: neutral H, fixed atoms, a0 = 0.01; N⁵⁺ → N⁶⁺ → N⁷⁺, mobile, a0 = 2 | 0.514 / 0.517; 0.220 / 0.213, 0.742 / 0.749, 0.0383 / 0.0380 (Monte Carlo scatter ~1 %); CPU and GPU identical |
+| ion collapse (`make physics`, as the check of GEM-PIC-RZ): rigid bunch n_b = 100 n0, σ_r = 2.5 k0⁻¹ (dx = σ_r/10), hydrogen and deuterium, on-axis Z n_i against a radial test-ion model with full blowout and the ion self-field, in the compression phase (3 … 30 n0) | H 1.7 %, D 0.7 % (before, while the blowout forms: 3.6 %, 3.9 %); peak 209 n0 (H), 186 n0 (D) |
+| several bunches: an electron and a positron bunch from the same seed; fields of two frozen bunches (γ = 200 electrons, γ = 50 positrons, offset) against the sum of each alone; flat-top rms length L/√12; transverse offset | 9e-17; 1e-7 (float output); 0.05 %; 0.005 |
 | GUI (`tests/gui.sh`): frames, cuts, 2 ranks = 1 rank, plasma frames | pass |
 | output groups and openPMD (`tests/openpmd.sh`): periods and selections of two groups, openPMD attributes and input deck, particles = native beam file, fields = native field file and axis file on a uniform grid | pass; 1.5e-7; exact; 1.5e-11 |
 | all of the above on a real GPU (RTX 5090, `make CUDA=1`); `tests/emu_wake.cpp` GPU against CPU; `tests/mpi.sh` with CUDA + MPI | pass, equal to the CPU build to rounding; bit for bit; identical |

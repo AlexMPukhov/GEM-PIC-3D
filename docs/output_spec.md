@@ -42,7 +42,7 @@ everything before the last dot.
 - **Axis lineouts** `axis_NNNNNN.txt`: one line per slice on the axis, ξ first, then the code's on-axis
   quantities (always the longitudinal field and the transverse force on a particle moving at c).
 - **openPMD** (standard 1.1.0, file based, one file per output step, basePath `/data/%T/`): meshes `E`, `B`
-  and the densities, particles per species with `position`, `positionOffset`, `momentum` (per real
+  and the densities (`n_e`; `n_i` = the charge density Z n_i of the mobile ions, in units of e), particles per species with `position`, `positionOffset`, `momentum` (per real
   particle), `weighting` (real particles per macroparticle), `charge`, `mass`. Every file stores the input
   deck after the command-line overrides (GEM-PIC-3D: dataset `/data/<T>/input_deck`). Non-uniform grids are
   written either interpolated to a uniform grid (readable by every openPMD reader) or exactly on the code's
@@ -55,11 +55,11 @@ everything before the last dot.
 
 | | QUARZ | GEM-PIC-RZ | GEM-PIC-3D |
 |---|---|---|---|
-| field names | `psi ez er eth br bth bz ne ni rhob nz_<species> a` | as QUARZ where they exist | `ex ey ez bx by bz ne` |
-| beams | beam block names | beam names | `bunch`, `trapped` (plasma electrons in the beam list) |
+| field names | `psi ez er eth br bth bz ne ni rhob nz_<species> a` | as QUARZ where they exist | `ex ey ez bx by bz ne ni` (`ni`: Z n_i of the mobile ions, with ion blocks) |
+| beams | beam block names | beam names | `bunch`, `trapped` (plasma electrons in the beam list), `injected` (all `inj_<ion name>`: electrons from field ionization in the beam list) |
 | native fields | `fields_NNNNNN.bin` (r–ξ planes) | text or HDF5 (sub-choice) | `fields_NNNNNN.bin`: the planes y = 0 and x = 0, the GUI frame format |
 | native beams | `beam_<n>_NNNNNN.bin` | as before | `beam_<species>_NNNNNN.txt`: x, y, ζ [µm], p [m c], weight [real particles] |
-| axis | ξ, E_z, ψ, n_e, ρ_b, slope | as QUARZ | ζ [µm], E_z, E_x − B_y, E_y + B_x [m c ω0/e], n_e/n0 with plasma |
+| axis | ξ, E_z, ψ, n_e, ρ_b, slope | as QUARZ | ζ [µm], E_z, E_x − B_y, E_y + B_x [m c ω0/e], n_e/n0 with plasma, Z n_i/n0 with mobile ions |
 | openPMD geometry | thetaMode | thetaMode | cartesian, axes (z, y, x), data [ζ][y][x] |
 | openPMD build | openPMD-api | HDF5 C library | HDF5 C library (`make HDF5=1`) |
 | openPMD keys | `openpmd_backend`, `openpmd_dr`, `openpmd_rmax`, `openpmd_options` | as RZ | `openpmd_dy`, `openpmd_dzeta` (uniform grid spacing; default the smallest step), `hdf5_single` (float32, default true), `hdf5_compression` (0–9) |
