@@ -27,6 +27,15 @@ make HDF5=1 BUILD=build-h5 && sh tests/openpmd.sh build-h5/gempic3d   # openPMD,
 sh tests/gui.sh build-mpi/gempic3d              # GUI
 ```
 
+GPU machine (from atto: `ssh cuda`, no password): RTX 5090, sm_120, CUDA 13.0 in /opt/cuda-13.0, gcc 14.1 in
+/opt/gcc-14.1.0, system OpenMPI 4.1.1 in /usr/lib64/openmpi; /storage2 is mounted as /.netmount/storage2.
+Non-interactive shells there need `LD_LIBRARY_PATH=/opt/isl-0.24/lib:/opt/mpfr-4.2.1/lib:/opt/gmp-6.2.1/lib:/opt/mpc-1.2.1/lib`
+for gcc 14's cc1plus (otherwise every compile fails silently); put the environment in a script and run it with
+`ssh cuda script` (example: /storage2/pukhov/g3d/env.sh, build_tests.sh, mpi_gpu.sh). MPI there: `OMPI_CXX=g++`
+and `mpirun --mca pml ob1 --mca btl self,vader` (the UCX layer crashes now and then in MPI_Finalize). Large
+files on atto go to /storage2/pukhov (builds and runs: /storage2/pukhov/g3d), never into the home directory.
+atto's `cp` is `cp -i`: use `\cp -f`. The atto nodes (Slurm partition `atto`, 24 cores) have no GPU.
+
 Container setup: `apt-get update && apt-get install -y libhdf5-dev pkg-config openmpi-bin libopenmpi-dev`,
 `pip install h5py numpy --break-system-packages`. Detached runs need `setsid nohup`.
 
@@ -40,8 +49,8 @@ Container setup: `apt-get update && apt-get install -y libhdf5-dev pkg-config op
 | `src/sim_config.cpp` | units, grids, `Config::from_deck` (incl. output groups), the run summary |
 | `src/sim_setup.cpp` | constructor, y and ζ setup, bunch loading, `init`, `step`, transverse window |
 | `src/sim_particles.cpp` | push, MPI handover, current deposition and its spectra and filters |
-| `src/sim_fields.cpp` | march over the slices, co-moving field, sponge on R − R_b, real-space fields |
-| `src/sim_plasma.cpp` | streaming plasma, trapping, re-streaming, grid lasers, slice-by-slice march |
+| `src/sim_fields.cpp` | march over the slices, co-moving field, sponge on R − R_b, real-space fields, grid lasers |
+| `src/sim_plasma.cpp` | streaming plasma (electrons, mobile ions), trapping, re-streaming, slice-by-slice march |
 | `src/sim_output.cpp` | `diag.txt`, field energy, dumps, GUI frames / native field files, axis, beams, `write_outputs` |
 | `src/openpmd.cpp` | openPMD 1.1.0 writer (HDF5 C library) |
 | `src/deck.*`, `src/grid.*`, `src/comm.*` | deck parser, free-hand step mappings, thin MPI layer |
@@ -55,6 +64,8 @@ Container setup: `apt-get update && apt-get install -y libhdf5-dev pkg-config op
 ## Status
 
 - Plasma stage 1 (single rank), free-hand ζ and y, any FFT size, FFTW, GPU emulator, MPI along ζ (no plasma).
+- Real GPU (2026-10-30, RTX 5090 on cuda.tp1): `make test`, `tests/emu_wake.cpp`, the examples and `tests/mpi.sh`
+  (CUDA + MPI) agree with the CPU build to rounding; 9-12x faster than 20 CPU threads (README, Performance).
 - Output groups as in QUARZ (`output`, `diag.<name>`), native and openPMD. GEM-PIC-RZ is to follow
   `docs/output_spec.md`; QUARZ is the reference.
 - 3D beam wake: the earlier ~9 % deviation from the continuum theory is the TSC shape of the plasma
@@ -62,7 +73,7 @@ Container setup: `apt-get update && apt-get install -y libhdf5-dev pkg-config op
 
 ## Next
 
-1. Run the GPU build on a GPU (only the emulator so far).
+1. (done) GPU build on a real GPU.
 2. Plasma: mobile ions, field ionization (ADK, NIST data, ported from GEM-PIC-RZ), several bunches.
 3. MPI with plasma (streaming particles handed between ranks): Alexander runs 4 MPI ranks, OpenMP helps little.
 4. External fields, undulators, chicanes; profiles as expressions; checkpoints.

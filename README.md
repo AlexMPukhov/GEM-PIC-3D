@@ -22,7 +22,7 @@ with the radiation of the bunch resolved on the grid and acting back on it
 make                      # build/gempic3d and build/tests (C++17, OpenMP, no external libraries)
 make test                 # 68 checks against analytic references, a few minutes on one core
 make MPI=1 BUILD=build-mpi                 # MPI (mpicxx); test: sh tests/mpi.sh build-mpi/gempic3d
-make CUDA=1 NVCC=nvcc CUDA_ARCH=-arch=sm_80 BUILD=build-gpu    # GPU (nvcc, cuFFT); add MPI=1 for both
+make CUDA=1 CUDA_ARCH=-arch=sm_120 BUILD=build-gpu  # GPU (nvcc, cuFFT; sm_80 A100, sm_90 H100/GH200); add MPI=1 for both
 make EMU=1 BUILD=build-emu test emu-selftest   # the GPU code paths on the CPU (GPU emulator, see Parallelism)
 make FFTW=1 BUILD=build-fftw               # optional: FFTW 3 instead of the own FFT (CPU builds)
 make HDF5=1 BUILD=build-h5                 # optional: openPMD output (HDF5); test: sh tests/openpmd.sh build-h5/gempic3d
@@ -234,11 +234,27 @@ Not covered: device code that reads host memory and the compile-time rules of nv
 with the real nvcc (`sh tools/install_cuda_pip.sh` installs nvcc and cuFFT from PyPI without root rights).
 
 **Status.** `tests/mpi.sh`: 2, 3 and 4 ranks reproduce the single-rank run exactly (laser, dense bunch, Fawley
-noise, sponge, window shifts, block-edge crossings in a graded ζ grid), with Fourier y and with the free-hand y. The CUDA build (also with MPI) compiles with nvcc 13.4 for
-sm_80 but has not been run on a GPU yet: run `build-gpu/tests` and `tests/mpi.sh` there first. With several
-ranks on GPUs the particle exchange goes through host memory each step. In the GPU emulator all tests and
-`tests/mpi.sh` pass, and nvcc 13.4 compiles the CUDA build for sm_80 (also with the free-hand grids); a run on a
-real GPU is still to be done.
+noise, sponge, window shifts, block-edge crossings in a graded ζ grid), with Fourier y and with the free-hand y.
+**First runs on a real GPU** (NVIDIA RTX 5090, CUDA 13.0, `make CUDA=1 CUDA_ARCH=-arch=sm_120`, 2026-10-30):
+all checks of `make test` pass and agree with the CPU build line by line to the printed digits, except at
+rounding level (cuFFT against the own FFT: round trips 2e-15 instead of 7e-16; the p-polarized p_x residual
+−9.27e-6 instead of −9.14e-6, tolerance 1e-4; the constant-step ζ table 5e-13 instead of 3e-14). The 3D beam
+wake of `tests/emu_wake.cpp` is identical bit for bit to the CPU build; `diag.txt` of 50 steps of
+`examples/lwfa_plasma.deck` and 40 steps of `examples/oblique_plane_wave.deck` agree in every printed digit, the
+axis lineouts to 1e-7 (E_z) and 7e-8 (n_e) of their maxima. `tests/mpi.sh` with the CUDA + MPI build
+(OpenMPI 4.1.1, several ranks on one GPU): identical to one rank for 2, 3 and 4 ranks. With several ranks on GPUs
+the particle exchange goes through host memory each step. Note: OpenMPI 4.1 with its UCX layer crashed now and
+then inside `MPI_Finalize` after a complete run (in `opal_common_ucx_del_procs`); `mpirun --mca pml ob1` avoids it.
+
+**Performance** (s per step; plasma runs on one rank, see Limits):
+
+| run | RTX 5090 | Xeon, 20 threads (same host) | atto node, 2 × 12-core Ivy Bridge, 24 threads | atto node, 4 ranks × 6 threads |
+|---|---|---|---|---|
+| `examples/lwfa_plasma.deck` (64 × 64 × 1201, 4 electrons per cell, 2 passes) | 0.42 | 3.9 | 3.05 | — |
+| `examples/oblique_plane_wave.deck` (256 × 128 × 1601, 400 000 macroparticles) | 0.23 | 2.7 | 2.65 | 2.8 |
+
+The GeForce card has 1/64 of its FP32 rate in FP64; a data-centre GPU (A100, H100, GH200) should gain several
+times more. The small grids of `make test` take longer on the GPU (2.2 min) than on 20 threads (1.4 min).
 
 ## Input deck
 
@@ -353,6 +369,7 @@ diag.light {
 | streaming in vacuum: a fast electron is trapped at ζ0 − (1 − v_z) Δ/v_z and moves on in the beam list; a slow one returns to streaming | 1e-9 |
 | GUI (`tests/gui.sh`): frames, cuts, 2 ranks = 1 rank, plasma frames | pass |
 | output groups and openPMD (`tests/openpmd.sh`): periods and selections of two groups, openPMD attributes and input deck, particles = native beam file, fields = native field file and axis file on a uniform grid | pass; 1.5e-7; exact; 1.5e-11 |
+| all of the above on a real GPU (RTX 5090, `make CUDA=1`); `tests/emu_wake.cpp` GPU against CPU; `tests/mpi.sh` with CUDA + MPI | pass, equal to the CPU build to rounding; bit for bit; identical |
 | all of the above except the 3D beam wake in the GPU emulator (`make EMU=1 test`); the 3D beam wake there on a reduced grid (`tests/emu_wake.cpp`: 32 × 32 modes, Δζ = 1, 10 steps, Fourier and free-hand y) against the CPU build; `tests/mpi.sh build-emu-mpi/gempic3d`; FFTW build | pass; E_z on the axis identical bit for bit; pass, pass (both before the output groups; to be rerun) |
 
 With the default grids (Fourier y, uniform ζ) the code reproduces the previous version (commit cf3ee50)
@@ -370,7 +387,7 @@ At 2.5 FWHM the residual A ~ 10⁻³ a0, amplified by the cross term 2p⊥0·A/h
   about 10 % off the continuum theory; resolve the wake modes accordingly (or compare with the theory of the
   scheme, as the check does).
 - **Plasma, performance:** the march goes slice by slice with plasma (FFTs of single planes); the LWFA example
-  takes about 25 s per step on one core.
+  takes about 25 s per step on one core, 3 s on a 24-core node and 0.4 s on an RTX 5090 (see Parallelism).
 
 - **Backward radiation is not described** (∂_s L dropped). A momentum gain from the recoil of backward
   or large-angle emission is outside the model by construction.
