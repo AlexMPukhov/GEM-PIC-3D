@@ -102,3 +102,8 @@ Container setup: `apt-get update && apt-get install -y libhdf5-dev pkg-config op
    tests/test_radiation.cpp; the scan in /storage2/pukhov/g3d/rad). Possible: the same with the plane wave.
 6. (done, 2026-10-30) Report: section "Version 2" added to docs/GEM-PIC-3D_report.tex; the PDF must be rebuilt
    where LaTeX works (atto's TeX Live 2018 lacks microtype and the ecrm fonts).
+7. Still missing against GEM-PIC-RZ (its docs/input_deck.md): lasers from LASY/openPMD envelope files and LASY
+   output; the flying focus; bunches from files (openPMD import); FEL diagnostics (fel.txt, fel_power,
+   fel_harmonics); bunch z_start, quiet start, axis_refine; ion `profile = own` (dopants); plasma radial profile
+   options; numerics.beam_field = mean (undulators with intense beams); a free-hand z grid; the chicane with MPI.
+   Also: understand the 1-2 % first-step change of a rigid bunch's field from the co-moving start.
