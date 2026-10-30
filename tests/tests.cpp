@@ -29,6 +29,11 @@ int main(int argc, char** argv) {
     test_adk_rate();
     test_field_ionization();
     test_bunches();
+    test_undulator();
+    test_magnets();
+    test_expr_parser();
+    test_expr_profiles();
+    test_checkpoint();
     std::printf("%s: %d failure(s)\n", failures ? "FAILED" : "ALL PASSED", failures);
     comm.finalize();
     return failures ? 1 : 0;

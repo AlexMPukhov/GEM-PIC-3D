@@ -10,6 +10,9 @@ void Simulation::push(double s0, double s1, long i0, long i1) {
     c.zc = cfg.zeta_center; c.dz_push = cfg.dz_push; c.push_phase = cfg.push_phase;
     c.zhand = comm.rank == 0 ? -1e300 : cfg.zeta[a + 1];
     c.zmax = cfg.zeta[N - 1]; c.s1 = s1; c.vz_min = cfg.plasma_on ? cfg.vz_min : 0; c.freeze = cfg.freeze_bunch;
+    c.hmin = 1e300;
+    for (int m = 0; m + 1 < N; ++m) c.hmin = std::min(c.hmin, cfg.dzeta(m));
+    c.Y0 = Y0; c.ext = external();
     c.ylo = yf ? -1e300 : cfg.ynode[1]; c.yhi = yf ? 1e300 : cfg.ynode[cfg.ny - 1];
     Particle* P = parts.data();
     par_for(i1 - i0, [=] HD(long k) {
@@ -27,7 +30,7 @@ void Simulation::exchange_particles(double s1) {
     std::vector<Particle> all = host_particles(), keep, hand;
     keep.reserve(all.size());
     for (auto& p : all) {
-        if (p.alive == 1) keep.push_back(p);
+        if (p.alive == 1 || p.alive == 4) keep.push_back(p);       // 4: slower than vz_min, streams (plasma)
         else if (p.alive == 2) hand.push_back(p);
         else ++lost_total;
     }

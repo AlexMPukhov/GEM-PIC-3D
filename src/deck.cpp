@@ -4,6 +4,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <cstdlib>
+#include <algorithm>
 
 static std::string trim(const std::string& s) {
     size_t a = s.find_first_not_of(" \t\r"), b = s.find_last_not_of(" \t\r");
@@ -18,7 +19,13 @@ Deck Deck::read(const std::string& file) {
     auto err = [&](const std::string& m) { return std::runtime_error(file + ":" + std::to_string(ln) + ": " + m); };
     while (std::getline(in, line)) {
         ++ln;
-        if (auto c = line.find('#'); c != std::string::npos) line = line.substr(0, c);
+        {   // comment: '#' outside quotes
+            bool q = false;
+            for (size_t c = 0; c < line.size(); ++c) {
+                if (line[c] == '"') q = !q;
+                else if (line[c] == '#' && !q) { line = line.substr(0, c); break; }
+            }
+        }
         line = trim(line);
         if (line.empty()) continue;
         if (block.empty()) {
@@ -26,7 +33,8 @@ Deck Deck::read(const std::string& file) {
             if (br == std::string::npos) throw err("expected 'block {'");
             block = trim(line.substr(0, br));
             if (d.blocks_.count(block)) {
-                if (block != "laser" && block != "ion" && block != "bunch") throw err("block '" + block + "' given twice");
+                static const std::set<std::string> rep = {"laser", "ion", "bunch", "undulator", "quadrupole", "plasma_lens", "solenoid"};
+                if (!rep.count(block)) throw err("block '" + block + "' given twice");
                 int k = 2;
                 while (d.blocks_.count(block + std::to_string(k))) ++k;
                 block += std::to_string(k);
@@ -50,6 +58,7 @@ Deck Deck::read(const std::string& file) {
 
 void Deck::set(const std::string& b, const std::string& k, const std::string& v, int line) {
     blocks_[b][k] = v; lines_[b][k] = line;
+    if (!order_[b].count(k)) order_[b][k] = line > 0 ? line : 1000000000 + int(order_[b].size());   // overrides keep the place
 }
 
 void Deck::override_from(const std::string& a) {
@@ -75,14 +84,24 @@ std::string Deck::where(const std::string& b, const std::string& k) const {
 std::string Deck::str(const std::string& b, const std::string& k, const std::string& def) const {
     if (!has(b, k)) return def;
     used_.insert(b + "." + k);
-    return blocks_.at(b).at(k);
+    const std::string& v = blocks_.at(b).at(k);
+    return v.size() >= 2 && v.front() == '"' && v.back() == '"' ? v.substr(1, v.size() - 2) : v;    // quotes
 }
 std::string Deck::str(const std::string& b, const std::string& k) const {
     if (!has(b, k)) throw std::runtime_error(file + ": missing key " + b + "." + k);
     return str(b, k, "");
 }
 double Deck::num(const std::string& b, const std::string& k, Kind kind) const {
-    return parse_with_unit(str(b, k), kind, where(b, k));
+    const std::string t = str(b, k);
+    try { return parse_with_unit(t, kind, where(b, k)); }
+    catch (const std::runtime_error&) {
+        // "number [unit]" with a unit of the wrong kind stays an error; anything else may be an expression
+        std::istringstream is(t);
+        double v; std::string u, rest;
+        double f;
+        if (Lu_ <= 0 || ((is >> v) && !(is >> u >> rest) && (u.empty() || unit_fn()(u, f)))) throw;
+        return expr_si(b, k, kind);
+    }
 }
 double Deck::num(const std::string& b, const std::string& k, Kind kind, double def) const {
     return has(b, k) ? num(b, k, kind) : def;
@@ -138,7 +157,8 @@ double parse_with_unit(const std::string& text, Kind kind, const std::string& wh
         {"u", {Kind::Mass, 1.66053906660e-27}}, {"m_p", {Kind::Mass, 1.67262192369e-27}},
         {"m_e", {Kind::Mass, 9.1093837015e-31}}, {"kg", {Kind::Mass, 1.0}},
         {"eV", {Kind::Energy, 1.0}}, {"keV", {Kind::Energy, 1e3}}, {"MeV", {Kind::Energy, 1e6}},
-        {"GeV", {Kind::Energy, 1e9}}};                                              // energies in eV
+        {"GeV", {Kind::Energy, 1e9}}, {"T", {Kind::Field, 1.0}}, {"mT", {Kind::Field, 1e-3}},
+        {"T/m", {Kind::Gradient, 1.0}}};                                              // energies in eV
     if (unit.empty()) {
         if (kind == Kind::None || kind == Kind::Angle) return v;   // a bare angle is in radians
         throw std::runtime_error(where + ": a unit is required");
@@ -158,4 +178,69 @@ std::string Deck::text() const {
         t += "}\n";
     }
     return t;
+}
+
+// ---------------------------------------------------------------- expressions
+namespace {
+// code unit of each kind in SI (lengths 1/k0, times 1/omega0, densities n_c, charge e, energy m c^2 [eV], mass m_e,
+// magnetic field m omega0 / e, gradient m omega0 / (e k0^-1))
+double code_si(Kind kind, double Lu, double Tu, double nc) {
+    const double me = 9.1093837015e-31, e = 1.602176634e-19;
+    switch (kind) {
+        case Kind::Length: return Lu;
+        case Kind::Time: return Tu;
+        case Kind::Density: return nc;
+        case Kind::Charge: return e;
+        case Kind::Energy: return 510998.95;
+        case Kind::Mass: return me;
+        case Kind::Field: return me / (Tu * e);
+        case Kind::Gradient: return me / (Tu * e) / Lu;
+        default: return 1.0;
+    }
+}
+}  // namespace
+
+void Deck::set_code_units(double Lu, double Tu, double nc) const { Lu_ = Lu; Tu_ = Tu; nc_ = nc; }
+
+Expr::UnitFn Deck::unit_fn() const {
+    const double Lu = Lu_, Tu = Tu_, nc = nc_;
+    return [Lu, Tu, nc](const std::string& u, double& f) {
+        if (u == "k0^-1") { f = 1; return true; }
+        if (u == "n_c") { f = 1; return true; }
+        for (Kind kind : {Kind::Length, Kind::Time, Kind::Charge, Kind::Density, Kind::Angle, Kind::Mass, Kind::Energy,
+                          Kind::Field, Kind::Gradient}) {
+            try { f = parse_with_unit("1 " + u, kind, "") / code_si(kind, Lu, Tu, nc); return true; }
+            catch (const std::runtime_error&) {}
+        }
+        return false;
+    };
+}
+
+std::vector<std::string> Deck::keys(const std::string& b) const {
+    std::vector<std::pair<int, std::string>> v;
+    auto it = order_.find(b);
+    if (it != order_.end()) for (auto& [k, o] : it->second) v.push_back({o, k});
+    std::sort(v.begin(), v.end());
+    std::vector<std::string> r;
+    for (auto& p : v) r.push_back(p.second);
+    return r;
+}
+
+// the block `constants`: each a value with unit or an expression of the constants above it (code units)
+void Deck::read_constants() const {
+    consts_.clear();
+    for (const auto& k : keys("constants")) {
+        std::string name = k;
+        for (char& ch : name) ch = char(std::tolower(static_cast<unsigned char>(ch)));
+        consts_[name] = expr("constants", k, {})(nullptr);
+    }
+}
+
+Expr Deck::expr(const std::string& b, const std::string& k, const std::vector<std::string>& vars) const {
+    try { return Expr(str(b, k), vars, consts_, unit_fn()); }
+    catch (const std::invalid_argument& e) { throw std::runtime_error(where(b, k) + ": " + e.what()); }
+}
+
+double Deck::expr_si(const std::string& b, const std::string& k, Kind kind) const {
+    return expr(b, k, {})(nullptr) * code_si(kind, Lu_, Tu_, nc_);
 }

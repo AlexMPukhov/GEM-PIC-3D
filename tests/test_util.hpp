@@ -79,3 +79,8 @@ void test_ion_collapse();
 void test_adk_rate();
 void test_field_ionization();
 void test_bunches();
+void test_undulator();
+void test_magnets();
+void test_expr_parser();
+void test_expr_profiles();
+void test_checkpoint();

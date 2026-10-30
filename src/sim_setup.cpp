@@ -54,6 +54,9 @@ Simulation::Simulation(const Config& c, Comm& cm) : cfg(c), comm(cm) {
     laser.eta_c = cfg.start_fwhm * cfg.tau;   // the bunch centre starts at eta = 0
     setup_plasma();
     setup_ions();
+    und_dev.upload(cfg.undulators);
+    ktab_dev.upload(cfg.ktab);
+    mag_dev.upload(cfg.magnets);
 }
 
 // Fourier y: k_y per iy as for x, all components on the nodes j*dy of the box (physical y = j*dy + Y0).

@@ -20,7 +20,7 @@ with the radiation of the bunch resolved on the grid and acting back on it
 
 ```
 make                      # build/gempic3d and build/tests (C++17, OpenMP, no external libraries)
-make test                 # 81 checks against analytic references, a few minutes on one core
+make test                 # 98 checks against analytic references, a few minutes on one core
 make physics              # ion collapse on a large grid: seconds on a GPU, minutes on a 24-core node
 make MPI=1 BUILD=build-mpi                 # MPI (mpicxx); test: sh tests/mpi.sh build-mpi/gempic3d
 make CUDA=1 CUDA_ARCH=-arch=sm_120 BUILD=build-gpu  # GPU (nvcc, cuFFT; sm_80 A100, sm_90 H100/GH200); add MPI=1 for both
@@ -176,8 +176,65 @@ Stage 1 of the physics of GEM-PIC-RZ, with the same algorithm (`src/sim_plasma.c
   offsets, each from its own seed (e.g. a drive and a witness bunch). The co-moving initial field
   −(∇⊥² + γ⁻²∂ζ²)ψ = ρ is solved for each bunch with its own γ and the forward fields are summed. `diag.txt`
   holds the moments of all bunches together; the beam files and openPMD have one species per bunch name.
-- **Not yet:** MPI with plasma (plasma runs on one rank), external fields and undulators, profiles as
-  expressions and checkpoints (the next stages).
+- **MPI:** the plasma march runs down the ranks along ζ (see Parallelism).
+- **Not yet:** profiles as expressions, chicanes and checkpoints (the next stages).
+
+## Undulators and transport elements
+
+As in GEM-PIC-RZ (`src/external.hpp`, `src/sim_external.cpp`, deck blocks `undulator`, `quadrupole`,
+`plasma_lens`, `solenoid`, each repeatable): static magnetic fields at the lab position of a particle, added to the
+gathered fields of the bunch push and of the streaming particles; the field solver does not see them.
+
+- **Undulator** (planar with natural focusing, or helical): B0 = K k_u, linear ramps of `ramp_periods` at both
+  ends (whole periods: no net angle). The summary prints the resonant wavelength λ_u (1 + K²/2)/(2γ²) (helical:
+  1 + K²) of every bunch, and warns if `dz` > λ_u/16 (the transverse current oscillates with the period).
+- **Quadrupole, plasma lens, solenoid** (with linear fringes): as in GEM-PIC-RZ.
+- **Push:** the RK4 sub-steps of the bunch push resolve the elements by themselves: at most λ_u/32 inside an
+  undulator (slippage to 1e-5) and 0.1/k_β inside a magnet (k_β of the bunch with the lowest energy), and they end
+  on every breakpoint of an element (entrance, ends of the ramps, exit), where the field or its derivative jumps;
+  the end stages of such a sub-step take the field just inside it. Without these rules RK4 drops to first order
+  at a fringe (3 % in the canonical angular momentum of the solenoid check at L/50 steps).
+- **Taper:** `K_function` (an expression of the lab position z) replaces `K`; it is tabulated with 32 points per
+  period, as in GEM-PIC-RZ.
+- **Not yet:** the chicane.
+
+## Checkpoints and restart
+
+`output.checkpoint_every = N` writes the complete state after every N-th step, one binary file per rank
+(`<output.dir>/checkpoint_NNNNNN_rRRRR.bin`, `src/sim_checkpoint.cpp`): level, step, transverse window, the forward
+fields R, E_z, B_z, L, the real fields with the ghost slices, the currents of level s⁰ (beam and streaming
+prediction), the beam list, the particles that join the next march, and the pending centroid sums of the window.
+`gempic3d deck --restart latest` (or `--restart NNNNNN`) continues from the newest complete checkpoint in
+`output.dir` with the same number of ranks and the same grid (the deck may change the output and the end of the
+run); `diag.txt` and `ionization.txt` are cut back to the restart step and continue. `output.walltime_hours`
+stops the run 1.5 mean step times before the limit, writes a checkpoint and exits with code 3, so a job script
+can resubmit:
+
+```
+R=""; ls out/checkpoint_*_r0000.bin > /dev/null 2>&1 && R="--restart latest"
+mpirun -np 4 gempic3d run.deck $R; [ $? = 3 ] && sbatch job.sh
+```
+
+## Functions and expressions
+
+As in GEM-PIC-RZ (`src/expr.*`, ported): a block `constants` defines named values (a number with unit, or an
+expression of the constants above it, in code units), and any single value of the deck may be an expression of
+them, e.g. `waist = "2 * w0"` (quotes when it contains blanks). Numbers in expressions carry their units and are
+converted to code units (lengths in k0⁻¹, densities in n_c, times in ω0⁻¹; also the units `k0^-1` and `n_c`);
+operators `+ − * / ^` (also `**`, right-associative, −x² = −(x²)), comparisons, `&& || !`, `cond ? a : b`, and the
+functions sin … atan2, exp, log (= ln), sqrt, abs, floor, ceil, min, max, pow, sign, step, if, gauss(x, s), rect(x, w).
+A number with a unit of the wrong kind stays an error. Keys that take functions so far:
+
+| block | key | variables | meaning |
+|---|---|---|---|
+| `plasma` | `density_function` | x, y, z, r | factor of the density (x, y relative to the axis, z the lab position; < 0 counts as 0) |
+| `undulator` | `K_function` | z | taper K(z), replaces `K` |
+
+```
+constants { n0 = 3.5e18 cm^-3;  Lup = 100 um }
+plasma    { density = n0;  density_function = "min(z / Lup, 1) * (1 + 0.2 * (r / (20 um))^2)" }
+undulator { period = 2 cm;  periods = 100;  K_function = "1.2 * (1 - 0.05 * max(z - 1 m, 0) / (1 m))" }
+```
 
 ## Ions and field ionization
 
@@ -264,6 +321,21 @@ stores only its own slices (about 256 bytes per grid point). The transverse wind
 centroid of step k − `window_lag` (non-blocking reduction, also in serial runs). The coupling march(q+1) →
 push(q) → march(q) limits the speedup to about P/2; the main gain is the memory per rank.
 
+**MPI with plasma.** The streaming particles cross the whole window in one march, so the march of a step runs
+down the ranks: rank q marches its half-cells b−1 … a after rank q+1. The package down (q+1 → q) holds the
+streaming particles at ζ_b, slice b of level s1 (k-space for the march, real space for the gather), the
+prediction of the streaming current of half-cell b−1 that the solve of slice b used, and the change s0 → s1 of
+half-cell b (extrapolation). The package up (q → q+1, after the first half-cell of q) holds the correction of R at
+slice b and the final streaming current of half-cell b−1, which rank q+1 needs before its sponge and as the
+prediction of the next step. Electrons trapped in half-cell a go to the beam list of the rank below; beam
+particles that fall below `vz_min` in half-cell b stream on the rank above. The rest of the step (push, currents,
+sponge) is as without plasma, and the densities and `ionization.txt` are gathered for the output. A beam-list
+sub-step moves a particle by at most half the smallest half-cell in ζ, which keeps the RK stages within the
+slices of the rank (and resolves slow trapped electrons). `tests/mpi.sh` (`tests/mpi_plasma.deck`: a0 = 2.5 grid
+laser, ramp, mobile H⁺, N⁵⁺ ionized by ADK, a witness and a positron driver, electrons trapped by ionization
+injection): 2, 3 and 4 ranks reproduce `diag.txt` and `ionization.txt` of one rank in every printed digit and the
+axis lineouts to 1e-7 (float output).
+
 **FFT sizes.** `nx` and `ny` can be any size. The own FFT (`src/fft.hpp`) uses radix 2 for powers of two
 (unchanged), a self-sorting mixed-radix Stockham transform for sizes whose prime factors are ≤ 31, and
 Bluestein's algorithm otherwise; sizes of the form 2^a 3^b 5^c 7^d are the fast ones. `make FFTW=1` uses FFTW 3
@@ -293,12 +365,16 @@ axis lineouts to 1e-7 (E_z) and 7e-8 (n_e) of their maxima. `tests/mpi.sh` with 
 the particle exchange goes through host memory each step. Note: OpenMPI 4.1 with its UCX layer crashed now and
 then inside `MPI_Finalize` after a complete run (in `opal_common_ucx_del_procs`); `mpirun --mca pml ob1` avoids it.
 
-**Performance** (s per step; plasma runs on one rank, see Limits):
+**Performance** (s per step):
 
 | run | RTX 5090 | Xeon, 20 threads (same host) | atto node, 2 × 12-core Ivy Bridge, 24 threads | atto node, 4 ranks × 6 threads |
 |---|---|---|---|---|
 | `examples/lwfa_plasma.deck` (64 × 64 × 1201, 4 electrons per cell, 2 passes) | 0.42 | 3.9 | 3.05 | — |
 | `examples/oblique_plane_wave.deck` (256 × 128 × 1601, 400 000 macroparticles) | 0.23 | 2.7 | 2.65 | 2.8 |
+
+With plasma the march runs down the ranks one after the other (see MPI with plasma), so MPI gives memory per rank,
+not speed: the LWFA example takes 3.3 s per step with 1 rank × 24 threads, 4.3 s with 4 ranks × 6 threads and 22 s
+with 4 ranks × 1 thread on one atto node.
 
 The GeForce card has 1/64 of its FP32 rate in FP64; a data-centre GPU (A100, H100, GH200) should gain several
 times more. The small grids of `make test` take longer on the GPU (2.2 min) than on 20 threads (1.4 min).
@@ -374,6 +450,11 @@ diag.light {
 | field ionization in a plane-wave pulse (τ = 30 k0⁻¹, 4096 atoms) against the rate equations with E = −dA/dη: neutral H, fixed atoms, a0 = 0.01; N⁵⁺ → N⁶⁺ → N⁷⁺, mobile, a0 = 2 | 0.514 / 0.517; 0.220 / 0.213, 0.742 / 0.749, 0.0383 / 0.0380 (Monte Carlo scatter ~1 %); CPU and GPU identical |
 | ion collapse (`make physics`, as the check of GEM-PIC-RZ): rigid bunch n_b = 100 n0, σ_r = 2.5 k0⁻¹ (dx = σ_r/10), hydrogen and deuterium, on-axis Z n_i against a radial test-ion model with full blowout and the ion self-field, in the compression phase (3 … 30 n0) | H 1.7 %, D 0.7 % (before, while the blowout forms: 3.6 %, 3.9 %); peak 209 n0 (H), 186 n0 (D) |
 | several bunches: an electron and a positron bunch from the same seed; fields of two frozen bunches (γ = 200 electrons, γ = 50 positrons, offset) against the sum of each alone; flat-top rms length L/√12; transverse offset | 9e-17; 1e-7 (float output); 0.05 %; 0.005 |
+| undulators (one electron, γ = 100, K = 1): planar u_x amplitude K, no drift; slippage over 6 periods against the exact integral of (γ − p_z)/p_z; helical \|u⊥\| = K; natural focusing k_β = K k_u/(√2 γ) | 1e-6; 6e-17; 7e-6; 5e-7; 3e-4 |
+| quadrupole x0 cos(√k L) and y0 cosh(√k L), plasma lens x0 cos(√k L) (γ = 1000, √k L = 1); solenoid with fringes: canonical angular momentum x p_y − y p_x − B r²/2 | 1e-7; 4e-8 (relative to B r²/2) |
+| expressions: operators, functions, units and constants against direct values; a deck value as an expression; wrong unit kind | 1e-16; exact; error |
+| `density_function` = the built-in parabolic channel (3 steps of a laser wake); `K_function = 1` = `K = 1`; linear taper: slippage against ∫⟨(γ − p_z)/p_z⟩ at the local K | 6e-10 (float output); 0; 4e-4 |
+| checkpoint (plasma ramp, laser wake, mobile H⁺, ionizing N⁵⁺, bunch, moving window): 2 steps, checkpoint, restart, 2 steps against 4 steps; `tests/checkpoint.sh`: `--restart latest` from step 4 of 12 (1 and 2 ranks), wall-time stop | fields 5e-10 (thread sums), beam list and window exact; `diag.txt`, `ionization.txt` identical; exit code 3 |
 | GUI (`tests/gui.sh`): frames, cuts, 2 ranks = 1 rank, plasma frames | pass |
 | output groups and openPMD (`tests/openpmd.sh`): periods and selections of two groups, openPMD attributes and input deck, particles = native beam file, fields = native field file and axis file on a uniform grid | pass; 1.5e-7; exact; 1.5e-11 |
 | all of the above on a real GPU (RTX 5090, `make CUDA=1`); `tests/emu_wake.cpp` GPU against CPU; `tests/mpi.sh` with CUDA + MPI | pass, equal to the CPU build to rounding; bit for bit; identical |

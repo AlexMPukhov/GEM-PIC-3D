@@ -26,6 +26,7 @@ make MPI=1 BUILD=build-mpi && sh tests/mpi.sh build-mpi/gempic3d
 make EMU=1 BUILD=build-emu test emu-selftest    # GPU code paths on the CPU
 make HDF5=1 BUILD=build-h5 && sh tests/openpmd.sh build-h5/gempic3d   # openPMD, needs h5py + numpy
 sh tests/gui.sh build-mpi/gempic3d              # GUI
+sh tests/checkpoint.sh build/gempic3d           # restart through the binary (add "mpirun -np 2" for MPI)
 ```
 
 GPU machine (from atto: `ssh cuda`, no password): RTX 5090, sm_120, CUDA 13.0 in /opt/cuda-13.0, gcc 14.1 in
@@ -51,8 +52,12 @@ Container setup: `apt-get update && apt-get install -y libhdf5-dev pkg-config op
 | `src/sim_setup.cpp` | constructor, y and ζ setup, `init`, `step`, transverse window |
 | `src/sim_particles.cpp` | push, MPI handover, current deposition and its spectra and filters |
 | `src/sim_fields.cpp` | march over the slices, co-moving field, sponge on R − R_b, real-space fields, grid lasers |
-| `src/sim_plasma.cpp` | streaming plasma (electrons, mobile ions), trapping, re-streaming, slice-by-slice march |
+| `src/sim_plasma.cpp` | streaming plasma: loading, spectra, the march slice by slice and down the MPI ranks, trapping, re-streaming |
+| `src/sim_stream.hpp` | device code of the streaming particles: Boris push, deposit, ADK ionization, one half-cell |
 | `src/sim_ions.cpp` | ion blocks of the deck, ADK tables on the device, `ionization.txt` |
+| `src/external.hpp`, `src/sim_external.cpp` | undulators and transport elements: fields, deck blocks, push sub-steps |
+| `src/expr.*` | expressions of the deck (from RZ); `Deck::expr`, `constants`, values as expressions in `Deck::num` |
+| `src/sim_checkpoint.cpp` | checkpoints per rank, restart, `latest` |
 | `src/sim_bunches.cpp` | bunch blocks (several bunches, positrons, flat-top), loading, co-moving field per bunch |
 | `src/ionization.*`, `src/atomic_data.*` | ADK rates (code units, device), counter-based RNG; NIST energies and masses (from RZ) |
 | `src/sim_output.cpp` | `diag.txt`, field energy, dumps, GUI frames / native field files, axis, beams, `write_outputs` |
@@ -69,7 +74,8 @@ Container setup: `apt-get update && apt-get install -y libhdf5-dev pkg-config op
 
 ## Status
 
-- Plasma stage 1 (single rank), free-hand ζ and y, any FFT size, FFTW, GPU emulator, MPI along ζ (no plasma).
+- Plasma, free-hand ζ and y, any FFT size, FFTW, GPU emulator, MPI along ζ (also with plasma: the march runs down
+  the ranks with packages down/up, README Parallelism; `tests/mpi.sh` covers it with `tests/mpi_plasma.deck`).
 - Real GPU (2026-10-30, RTX 5090 on cuda.tp1): `make test`, `tests/emu_wake.cpp`, the examples and `tests/mpi.sh`
   (CUDA + MPI) agree with the CPU build to rounding; 9-12x faster than 20 CPU threads (README, Performance).
 - Ions (2026-10-30): mobile ion species (`ion` blocks, RZ keys), separate n_e / Z n_i output, ADK field ionization
@@ -86,7 +92,9 @@ Container setup: `apt-get update && apt-get install -y libhdf5-dev pkg-config op
 
 1. (done) GPU build on a real GPU.
 2. (done) Plasma: mobile ions, field ionization, several bunches (electrons and positrons).
-3. MPI with plasma (streaming particles handed between ranks): Alexander runs 4 MPI ranks, OpenMP helps little.
-4. External fields, undulators, chicanes; profiles as expressions; checkpoints.
+3. (done) MPI with plasma. Possible later: pipelining over steps on the GPU, CUDA-aware MPI.
+4. (done) Undulators, quadrupole, plasma lens, solenoid; expressions (constants, values, density_function,
+   K_function); checkpoints (`tests/checkpoint.sh`). Next: more function keys (laser profile/envelope, bunch
+   profiles), chicane.
 5. Radiation energy balance check (coherent emission vs far-field integral, plane wave as undulator).
 6. Report update (it describes v1).

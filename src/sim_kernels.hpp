@@ -2,6 +2,7 @@
 // (src/sim_particles.cpp; the gather is also used by the plasma), and the per-mode march of a slice
 // (src/sim_fields.cpp, src/sim_plasma.cpp). Header-only: the kernels are inlined into every caller.
 #pragma once
+#include "external.hpp"
 #include "sim_internal.hpp"
 
 // ---------------------------------------------------------------- particles (device code)
@@ -10,6 +11,9 @@ struct PushCtx {
     const float* F; int a, ns, N, nx, ny, nk, self, yf; double dx, dy, Lx, Ly;
     Axis zax, yax;
     Laser laser; double X0, zc, dz_push, push_phase, zhand, zmax, ylo, yhi, s1, vz_min; int freeze;
+    double hmin;                    // shortest half-cell: a sub-step moves a particle by at most hmin/2 in zeta
+    double Y0;                      // y of the box origin (lab y = y + Y0)
+    External ext;                   // undulators and magnets
 };
 struct State { double x, y, zeta, px, py, pz; };
 
@@ -42,6 +46,7 @@ HD inline void gather(const PushCtx& c, double x, double y, double zeta, double 
     if (!c.self) return;
     int n; double fz;
     c.zax.locate(zeta, n, fz);
+    if (n == c.a - 1 && fz > 1 - 1e-9) { n = c.a; fz = 0; }   // on the lowest slice (rounding of locate)
     const int fl = n - c.a;
     if (fl < 0 || fl > c.ns) return;
     int ix[3], jn[3], jh[3]; double wx[3], wn[3], wh[3];
@@ -75,6 +80,7 @@ HD inline bool rhs(const PushCtx& c, const State& Y, double z, double qm, State&
     gather(c, ::fmod(::fmod(Y.x, c.Lx) + c.Lx, c.Lx), c.yf ? ::fmod(::fmod(Y.y, c.Ly) + c.Ly, c.Ly) : Y.y, Y.zeta, E, B);
     c.laser.field(Y.x + c.X0, z, z - (Y.zeta - c.zc), Ee, Be);
     for (int k = 0; k < 3; ++k) { E[k] += Ee[k]; B[k] += Be[k]; }
+    if (c.ext.any()) add_external(c.ext, Y.x + c.X0, Y.y + c.Y0, z, B);
     const double ip = 1 / Y.pz;
     d.x = Y.px * ip; d.y = Y.py * ip; d.zeta = -gm * ip;
     d.px = qm * (g * E[0] + Y.py * B[2] - Y.pz * B[1]) * ip;
@@ -85,9 +91,10 @@ HD inline bool rhs(const PushCtx& c, const State& Y, double z, double qm, State&
 HD inline State axpy(const State& a, double h, const State& b) {
     return State{a.x + h * b.x, a.y + h * b.y, a.zeta + h * b.zeta, a.px + h * b.px, a.py + h * b.py, a.pz + h * b.pz};
 }
-// RK4 from z0 to the plane s1. A sub-step is at most dz_push and at most push_phase of the laser phase.
-// A particle that enters the half-cells of the rank below (zeta < zhand) at the start of a sub-step is
-// handed over with the rest of the step.
+// RK4 from z0 to the plane s1. A sub-step is at most dz_push, at most push_phase of the laser phase, moves the
+// particle by at most hmin/2 in zeta (slow trapped electrons; it also keeps the RK stages within the slices of
+// this rank) and resolves the external elements (external_step). A particle that enters the half-cells of the rank below (zeta < zhand) at the start of a sub-step
+// is handed over with the rest of the step.
 HD inline void push_one(const PushCtx& c, Particle& p, double z0) {
     if (c.freeze && is_bunch(p.sp)) { p.z = c.s1; return; }   // numerics.freeze_bunch: rigid, (x, y, zeta, p) fixed
     State Y{p.x, p.y, p.zeta, p.px, p.py, p.pz};
@@ -105,16 +112,25 @@ HD inline void push_one(const PushCtx& c, Particle& p, double z0) {
             return;
         }
         double ds = c.dz_push < c.s1 - z ? c.dz_push : c.s1 - z;
+        {
+            const double g = ::sqrt(1 + Y.px * Y.px + Y.py * Y.py + Y.pz * Y.pz);
+            const double lz = 0.5 * c.hmin * Y.pz * (g + Y.pz) / (1 + Y.px * Y.px + Y.py * Y.py);   // hmin/2 / |dzeta/dz|
+            if (lz < ds) ds = (c.s1 - z) / ::ceil((c.s1 - z) / lz);
+        }
         if (c.laser.on) {
             const double g = ::sqrt(1 + Y.px * Y.px + Y.py * Y.py + Y.pz * Y.pz);
             const double hl = g - Y.px * c.laser.kx - Y.pz * c.laser.kz;
             const double lim = c.push_phase * Y.pz / (c.laser.kL * (hl > 1e-12 ? hl : 1e-12));
             if (lim < ds) ds = (c.s1 - z) / ::ceil((c.s1 - z) / lim);
         }
+        if (c.ext.any()) ds = external_step(c.ext, z, ds);   // resolve the external elements
         State k1, k2, k3, k4;
         const double qm = p.qm;
-        if (!(rhs(c, Y, z, qm, k1) && rhs(c, axpy(Y, 0.5 * ds, k1), z + 0.5 * ds, qm, k2) &&
-              rhs(c, axpy(Y, 0.5 * ds, k2), z + 0.5 * ds, qm, k3) && rhs(c, axpy(Y, ds, k3), z + ds, qm, k4))) {
+        // with external elements the end stages take the field just inside the sub-step: the sub-steps end on the
+        // breakpoints of the elements, where the field (or its derivative) jumps
+        const double e = c.ext.any() ? 1e-9 * ds : 0.0;
+        if (!(rhs(c, Y, z + e, qm, k1) && rhs(c, axpy(Y, 0.5 * ds, k1), z + 0.5 * ds, qm, k2) &&
+              rhs(c, axpy(Y, 0.5 * ds, k2), z + 0.5 * ds, qm, k3) && rhs(c, axpy(Y, ds, k3), z + ds - e, qm, k4))) {
             p.alive = 0;
             return;
         }

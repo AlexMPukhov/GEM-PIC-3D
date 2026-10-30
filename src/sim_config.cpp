@@ -61,7 +61,8 @@ double Config::plasma_density(double x, double y, double z) const {
             f = (1 - t) * pz_values[k - 1] + t * pz_values[k];
         }
     }
-    const double g = parabolic ? 1 + channel_depth * r2 / (r_channel * r_channel) : 1.0;
+    double g = parabolic ? 1 + channel_depth * r2 / (r_channel * r_channel) : 1.0;
+    if (!density_fn.empty()) g *= std::max(0.0, density_fn({x, y, z, std::sqrt(r2)}));
     return f * g > 0 ? n0 * f * g : 0.0;
 }
 
@@ -72,6 +73,8 @@ Config Config::from_deck(const Deck& d) {
     c.Lu = c.lambda0 / (2 * M_PI); c.Tu = c.Lu / c_SI;
     const double w0 = c_SI / c.Lu;
     c.nc = eps0 * me_SI * w0 * w0 / (e_SI * e_SI);
+    d.set_code_units(c.Lu, c.Tu, c.nc);                 // expressions and the block `constants`
+    d.read_constants();
     auto L = [&](const std::string& b, const std::string& k) { return d.num(b, k, Kind::Length) / c.Lu; };
     auto Ld = [&](const std::string& b, const std::string& k, double def_code) {
         return d.has(b, k) ? d.num(b, k, Kind::Length) / c.Lu : def_code; };
@@ -176,6 +179,7 @@ Config Config::from_deck(const Deck& d) {
         c.ppc_x = int(d.integer("plasma", "ppc_x", 2)); c.ppc_y = int(d.integer("plasma", "ppc_y", c.ppc_x));
         if (c.ppc_x < 1 || c.ppc_y < 1) throw std::runtime_error("plasma: ppc_x, ppc_y must be >= 1");
         c.smooth_length = Ld("plasma", "smooth_length", 0.0);
+        if (d.has("plasma", "density_function")) c.density_fn = d.expr("plasma", "density_function", {"x", "y", "z", "r"});
         if (c.smooth_length < 0) throw std::runtime_error("plasma.smooth_length must be >= 0");
     }
     c.parse_ions(d);
@@ -194,10 +198,14 @@ Config Config::from_deck(const Deck& d) {
     if ((c.plasma_on || !c.glasers.empty()) && !c.self_fields)
         throw std::runtime_error("numerics.self_fields = false is for test particles in the analytic laser only (no plasma, no grid lasers)");
     c.parse_bunches(d);
+    c.parse_external(d);
     c.dir = d.str("output", "dir", "out");
     c.every = int(d.integer("output", "every", 10));
     c.dump_particles = d.flag("output", "particles", true);
     c.frames = d.flag("output", "frames", false);
+    c.checkpoint_every = int(d.integer("output", "checkpoint_every", 0));
+    c.walltime_hours = d.num("output", "walltime_hours", Kind::None, 0.0);
+    if (c.checkpoint_every < 0 || c.walltime_hours < 0) throw std::runtime_error("output: checkpoint_every and walltime_hours must be >= 0");
     // output groups (as in QUARZ): the main output (block output) and the diagnostics diag.<name>
     auto words = [](std::string t) {
         for (char& ch : t) if (ch == ',') ch = ' ';
@@ -307,6 +315,7 @@ void Config::summary(FILE* f, int ranks) const {
                      b.charge * 1e12, b.gamma, b.sigx * um, b.sigy * um, b.length > 0 ? "flat-top length" : "sigma_z",
                      (b.length > 0 ? b.length : b.sigz) * um, b.zeta_center * um, b.x0 * um, b.y0 * um, b.nmacro, b.noise.c_str());
     std::fprintf(f, "  push: RK4 in z, sub-step <= %.3g rad of laser phase\n", push_phase);
+    summary_external(f);
     std::fprintf(f, "  parallel: %s, %d MPI rank(s), transverse window lag %d steps\n", GEMPIC_GPU ? "CUDA" : "OpenMP", ranks, window_lag);
     for (size_t k = 0; k < glasers.size(); ++k)
         std::fprintf(f, "  grid laser %zu: a0 = %g, lambda = %.4g um, waist = %.4g um, tau_FWHM = %.4g fs, centre at zeta = %.4g um, focus at z = %.4g um, %s\n",
@@ -316,6 +325,7 @@ void Config::summary(FILE* f, int ranks) const {
         std::fprintf(f, "  plasma: n0 = %.4g cm^-3 (%.4g n_c), %s, r_max = %.4g um, %d x %d per cell, smooth_length %.4g um; %d passes per slice, predictor %s, vz_min %.3g, vz_beam %.3g\n",
                      n0 * nc * 1e-6, n0, parabolic ? "parabolic channel" : "uniform", r_max < 1e299 ? r_max * um : -1.0, ppc_x, ppc_y,
                      smooth_length * um, iterations, predictor_extrapolate ? "extrapolate" : "previous", vz_min, vz_beam);
+    if (plasma_on && !density_fn.empty()) std::fprintf(f, "  plasma density_function(x, y, z, r) = %s\n", density_fn.text().c_str());
     for (const auto& s : ions)
         std::fprintf(f, "  ion %s: M = %.6g m_e, Z0 = %d, n_atom = %.4g n_e, %s%s\n", s.name.c_str(), s.mass, s.Z0, s.atoms,
                      s.mobile ? "mobile" : s.ionization ? "fixed" : "immobile background",

@@ -16,175 +16,10 @@
 //  4. streaming particles that reach z = s1 + (trap_advance - 1) dz are trapped: they join the beam list if
 //     v_z >= vz_beam, otherwise they stream again in the next step from their zeta
 //  5. sponge, real fields
-namespace {
-HD inline void boris(double& ux, double& uy, double& uz, const double E[3], const double B[3], double qm, double dt) {
-    const double qh = 0.5 * qm * dt;
-    const double umx = ux + qh * E[0], umy = uy + qh * E[1], umz = uz + qh * E[2];
-    const double gm = ::sqrt(1.0 + umx * umx + umy * umy + umz * umz);
-    const double tx = qh * B[0] / gm, ty = qh * B[1] / gm, tz = qh * B[2] / gm;
-    const double t2 = tx * tx + ty * ty + tz * tz;
-    const double upx = umx + (umy * tz - umz * ty), upy = umy + (umz * tx - umx * tz), upz = umz + (umx * ty - umy * tx);
-    const double sf = 2.0 / (1.0 + t2);
-    const double vx = umx + sf * (upy * tz - upz * ty), vy = umy + sf * (upz * tx - upx * tz), vz = umz + sf * (upx * ty - upy * tx);
-    ux = vx + qh * E[0]; uy = vy + qh * E[1]; uz = vz + qh * E[2];
-}
-
-struct StreamCtx {
-    PushCtx pc;                 // fields (gather), laser, grids
-    const double* zs;           // slice positions
-    double* J;                  // real current plane of the half-cell: jx, jy, jz (3 nk)
-    const double *ia, *id;      // 1/A_j, 1/Delta_j (Fourier y: 1/dy)
-    double Delta, s1, sTrap, vz_beam;
-    int n;
-    // ions: species constants, ADK levels, the list of electrons freed in this pass (count, capacity), random key
-    const IonDev* ions; const AdkLevel* adk; Particle* born; int* bcnt; int bcap; uint64_t key;
-};
-
-// TSC deposit of q w (dt / Delta) v / (h dx dy) at (x, y) into the half-cell plane (box coordinates); the charge
-// goes to plane 3 (negative particles) or 4 (positive: ions, positrons)
-HD inline void stream_deposit(const StreamCtx& c, double x, double y, double f, double vx, double vy, double vz) {
-    const PushCtx& P = c.pc;
-    int ix_[3], jn[3], jh[3]; double wx[3], wn[3], wh[3];
-    tsc(x, P.dx, P.nx, ix_, wx);
-    const long nk = P.nk, cq = (f < 0 ? 3 : 4) * nk;
-    if (P.yf) {
-        tsc(y, P.dy, P.ny, jn, wn);
-        for (int v = 0; v < 3; ++v)
-            for (int u = 0; u < 3; ++u) {
-                const long k = long(jn[v]) * P.nx + ix_[u];
-                const double w = f * wx[u] * wn[v] * c.ia[0];
-                atomic_add(&c.J[k], w * vx); atomic_add(&c.J[nk + k], w * vy); atomic_add(&c.J[2 * nk + k], w * vz);
-                atomic_add(&c.J[cq + k], w);
-            }
-        return;
-    }
-    tsc_y(P.yax, y, jn, wn, jh, wh);
-    for (int v = 0; v < 3; ++v) {
-        const bool nod = jn[v] >= 1 && jn[v] <= P.ny - 1, hal = jh[v] >= 0 && jh[v] <= P.ny - 1;
-        for (int u = 0; u < 3; ++u) {
-            if (nod) {
-                const long k = long(jn[v]) * P.nx + ix_[u];
-                const double w = f * wx[u] * wn[v] * c.ia[jn[v]];
-                atomic_add(&c.J[k], w * vx); atomic_add(&c.J[2 * nk + k], w * vz); atomic_add(&c.J[cq + k], w);
-            }
-            if (hal) {
-                const long k = long(jh[v]) * P.nx + ix_[u];
-                atomic_add(&c.J[nk + k], f * wx[u] * wh[v] * c.id[jh[v]] * vy);
-            }
-        }
-    }
-}
-
-// |E| (grid and analytic laser) at (x, y) at the lab position z and the slice position zeta
-HD inline double field_abs(const StreamCtx& c, double x, double y, double z, double zeta) {
-    const PushCtx& P = c.pc;
-    double E[3], B[3], Ee[3], Be[3];
-    gather(P, ::fmod(::fmod(x, P.Lx) + P.Lx, P.Lx), P.yf ? ::fmod(::fmod(y, P.Ly) + P.Ly, P.Ly) : y, zeta, E, B);
-    P.laser.field(x + P.X0, z, z - (zeta - P.zc), Ee, Be);
-    for (int k = 0; k < 3; ++k) E[k] += Ee[k];
-    return ::sqrt(E[0] * E[0] + E[1] * E[1] + E[2] * E[2]);
-}
-
-// Monte Carlo field ionization of an ion macroparticle during dt (as GEM-PIC-RZ): the ADK rate of its level is
-// averaged over the fields at the two ends of the half-cell, (w(E1) + w(E0))/2, and sequential ionization
-// k -> k+1 -> ... is sampled with exponential waiting times. Each event frees one electron per represented atom,
-// at the ion with its velocity.
-HD inline void ionize(const StreamCtx& c, Particle& p, double E1, double E0, double dt) {
-    const IonDev& I = c.ions[p.sp - SP_ION];
-    if (!I.ionizing || (E1 < I.Emin && E0 < I.Emin)) return;
-    const uint64_t base = ion_key_particle(c.key, p.id);
-    int Z = int(::floor(p.q + 0.5));
-    const int Z0 = Z;
-    unsigned draw = 0;
-    double tleft = dt;
-    while (Z < I.Zmax) {
-        const AdkLevel& L = c.adk[I.off + Z];
-        const double w = 0.5 * (adk_rate(L, E1) + adk_rate(L, E0));
-        if (!(w > 0)) break;
-        const double tw = -::log(1.0 - uniform01(base + draw++)) / w;
-        if (tw > tleft) break;
-        tleft -= tw; ++Z;
-        Particle e = p;
-        e.q = -1; e.qm = -1; e.sp = SP_FREED + (p.sp - SP_ION); e.alive = 1;
-        const int j = atomic_inc(c.bcnt);
-        if (j < c.bcap) c.born[j] = e;
-    }
-    if (Z != Z0) { p.q = Z; p.qm = Z / I.mass; }
-}
-
-// one streaming particle through half-cell n (from its zeta, normally zeta_{n+1}, to zeta_n)
-HD inline void stream_one(const StreamCtx& c, Particle& p) {
-    const int n = c.n;
-    const double zn = c.zs[n], zn1 = c.zs[n + 1], h = zn1 - zn;
-    if (p.alive == 6) {             // waiting: joins the march inside the half-cell that holds its zeta
-        if (p.zeta > zn) p.alive = 1;
-        else return;
-    }
-    if (p.alive != 1) return;
-    const double hl = p.zeta >= zn1 - 1e-9 * h ? h : (p.zeta - zn > 0 ? p.zeta - zn : 0.0);
-    const PushCtx& P = c.pc;
-    const bool ion = is_ion(p.sp);
-    if (ion && !c.ions[p.sp - SP_ION].mobile) {     // fixed ion (ionizing): its charge, then the ionization
-        const double f = p.q * p.w * hl / (c.Delta * h * P.dx);
-        if (f != 0) stream_deposit(c, p.x, p.y, f, 0, 0, 0);
-        const double E1 = field_abs(c, p.x, p.y, p.z, p.zeta), E0 = field_abs(c, p.x, p.y, p.z, zn);
-        p.zeta = zn;
-        ionize(c, p, E1, E0, hl);
-        return;
-    }
-    const double zeta0 = p.zeta;
-    const double g0 = ::sqrt(1 + p.px * p.px + p.py * p.py + p.pz * p.pz);
-    const double omv0 = (1 + p.px * p.px + p.py * p.py) / (g0 * (g0 + p.pz));    // 1 - v_z, no cancellation
-    const double dt0 = hl / omv0;
-    const double xm = p.x + 0.5 * dt0 * p.px / g0, ym = p.y + 0.5 * dt0 * p.py / g0;
-    const double zm = p.z + 0.5 * dt0 * p.pz / g0, zetam = p.zeta - 0.5 * hl;
-    double E[3], B[3], Ee[3], Be[3];
-    gather(P, ::fmod(::fmod(xm, P.Lx) + P.Lx, P.Lx), P.yf ? ::fmod(::fmod(ym, P.Ly) + P.Ly, P.Ly) : ym, zetam, E, B);
-    P.laser.field(xm + P.X0, zm, zm - (zetam - P.zc), Ee, Be);
-    for (int k = 0; k < 3; ++k) { E[k] += Ee[k]; B[k] += Be[k]; }
-    double ux = p.px, uy = p.py, uz = p.pz;
-    boris(ux, uy, uz, E, B, p.qm, dt0);
-    double g1 = ::sqrt(1 + ux * ux + uy * uy + uz * uz);
-    double dt = 2 * hl / (omv0 + (1 + ux * ux + uy * uy) / (g1 * (g1 + uz)));    // time for |dzeta| = hl
-    ux = p.px; uy = p.py; uz = p.pz;
-    boris(ux, uy, uz, E, B, p.qm, dt);
-    g1 = ::sqrt(1 + ux * ux + uy * uy + uz * uz);
-    double vx = 0.5 * (p.px / g0 + ux / g1), vy = 0.5 * (p.py / g0 + uy / g1), vz = 0.5 * (p.pz / g0 + uz / g1);
-    double zeta_end = zn;
-    bool trapped = false;
-    if (p.z + vz * dt >= c.sTrap) {    // advanced trap_advance steps inside this half-cell: trapped
-        const double dtp = (c.sTrap - p.z) / (vz > 1e-3 ? vz : 1e-3) > 0 ? (c.sTrap - p.z) / (vz > 1e-3 ? vz : 1e-3) : 0.0;
-        ux = p.px; uy = p.py; uz = p.pz;
-        boris(ux, uy, uz, E, B, p.qm, dtp);
-        g1 = ::sqrt(1 + ux * ux + uy * uy + uz * uz);
-        vx = 0.5 * (p.px / g0 + ux / g1); vy = 0.5 * (p.py / g0 + uy / g1); vz = 0.5 * (p.pz / g0 + uz / g1);
-        dt = dtp;
-        zeta_end = p.zeta - (1 - vz) * dtp;
-        trapped = true;
-    }
-    const double xo = p.x, yo = p.y;
-    p.x += vx * dt; p.y += vy * dt;
-    p.z = trapped ? c.s1 : p.z + vz * dt;
-    p.px = ux; p.py = uy; p.pz = uz;
-    p.zeta = zeta_end;
-    // streaming current: q w dt / Delta per unit time, into half-cell n
-    const double f = p.q * p.w * dt / (c.Delta * h * P.dx);
-    if (f != 0) stream_deposit(c, 0.5 * (xo + p.x), 0.5 * (yo + p.y), f, vx, vy, vz);
-    if (!P.yf && (p.y < P.ylo || p.y > P.yhi)) { p.alive = 0; return; }
-    if (ion && !trapped && c.ions[p.sp - SP_ION].ionizing)
-        ionize(c, p, field_abs(c, xm, ym, zm, zeta0), field_abs(c, xm, ym, zm, zn), dt);
-    if (trapped) {
-        p.alive = 5;
-        const double vze = uz / g1;
-        if (vze >= c.vz_beam)        // joins the beam list: its beam current of level s1 from now on
-            stream_deposit(c, p.x, p.y, p.q * p.w / (h * P.dx * vze), ux / g1, uy / g1, vze);
-    }
-}
-}  // namespace
+#include "sim_stream.hpp"
 
 void Simulation::setup_plasma() {
     if (!cfg.plasma_on) return;
-    if (comm.size > 1) throw std::runtime_error("plasma: MPI along zeta is not available with plasma yet (run on one rank)");
     const size_t pl = size_t(nk);
     for (Buf<cpx>* p : {&js0x, &js0y, &js0z}) p->resize((ns + 1) * pl);
     jsr.resize(5 * pl);
@@ -205,14 +40,15 @@ void Simulation::setup_plasma() {
 // fresh plasma at the front of the window (a regular lattice of ppc_x x ppc_y particles per cell; the mobile ions
 // of every ion block at the positions of the electrons: neutral pairs), and the particles that join the march at
 // their zeta
-void Simulation::load_plasma(double s0, double s1, const std::vector<Particle>& joining) {
+void Simulation::load_plasma(double s0, double s1, const std::vector<Particle>& joining, const std::vector<Particle>* arriving) {
     std::vector<Particle> v;
+    if (arriving) v = *arriving;                           // MPI, below the top rank: the particles from above
     long cap = 0;                                          // electrons that the ionization can free in this step
     const unsigned long long id0 = (unsigned long long)(istep + 1) << 32;
     const double zmid = 0.5 * (s0 + s1), Delta = s1 - s0;
     const int nx = cfg.nx, ny = cfg.ny, px = cfg.ppc_x, py = cfg.ppc_y;
     const double zf = cfg.zeta[N - 1];
-    for (int j = 0; j < ny; ++j) {
+    for (int j = 0; j < (arriving ? 0 : ny); ++j) {
         double y0, hy;
         if (yf) { y0 = j * dy; hy = dy; }
         else {
@@ -238,12 +74,13 @@ void Simulation::load_plasma(double s0, double s1, const std::vector<Particle>& 
                         q.q = is.Z0; q.qm = is.Z0 / is.mass; q.w = is.atoms * p.w; q.sp = SP_ION + int(k);
                         q.id = id0 + v.size();
                         v.push_back(q);
-                        if (is.ionization) cap += is.Zmax - is.Z0;
                     }
                 }
     }
     fresh_last = long(v.size());
     for (Particle p : joining) { p.alive = 6; v.push_back(p); }
+    for (const auto& p : v)
+        if (is_ion(p.sp) && cfg.ions[p.sp - SP_ION].ionization) cap += cfg.ions[p.sp - SP_ION].Zmax - std::lround(p.q);
     nstrm = long(v.size());
     born_cap = cap;
     const size_t need = v.size() + size_t(cap);
@@ -390,7 +227,23 @@ void Simulation::real_fields_slice(int n) {
 void Simulation::march_plasma(double s0, double s1) {
     const double Delta = s1 - s0, D = 0.5 * Delta;
     const long nkk = nk;
-    load_plasma(s0, s1, joining_);
+    const size_t pl = size_t(nk);
+    const bool top = comm.rank == comm.size - 1, bottom = comm.rank == 0;
+    const int nhi = top ? N - 2 : b - 1;               // the half-cells of this rank: nhi down to a
+    auto hpl = [&](int m) { return long(m - a + 1) * nkk; };   // plane of half-cell m (jk, js0)
+    auto spl = [&](int n) { return long(n - a) * nkk; };       // plane of slice n (R, E_z, B_z)
+    std::vector<cpx> pk;                                // package from above: bnd (6 planes), prediction, change
+    if (top) load_plasma(s0, s1, joining_, nullptr);
+    else {
+        const std::vector<Particle> arr = comm.recv_vec<Particle>(comm.rank + 1, TAG_PPART);
+        pk.resize(12 * pl);
+        comm.recv(comm.rank + 1, TAG_PDOWN, pk.data(), pk.size());
+        std::vector<float> fb(6 * pl);
+        comm.recv(comm.rank + 1, TAG_PDOWNF, fb.data(), fb.size());
+        for (int c = 0; c < 6; ++c) F.from_host(&fb[c * pl], (size_t(c) * (ns + 2) + ns) * pl, pl);   // ghost slice b
+        bnd.from_host(pk.data(), 0, 6 * pl);
+        load_plasma(s0, s1, joining_, &arr);
+    }
     joining_.clear();
     const bool extrap = cfg.predictor_extrapolate;
     std::vector<double> cen(N - 1);
@@ -400,7 +253,7 @@ void Simulation::march_plasma(double s0, double s1) {
     };
     // set the streaming part of jk(m) from `old` (the part it holds now) to `nw`; old <- nw
     auto replace = [&](int m, cpx* old, const cpx* nw) {
-        cpx* jx = jkx.data() + (m + 1) * nkk; cpx* jy = jky.data() + (m + 1) * nkk; cpx* jz = jkz.data() + (m + 1) * nkk;
+        cpx* jx = jkx.data() + hpl(m); cpx* jy = jky.data() + hpl(m); cpx* jz = jkz.data() + hpl(m);
         par_for(nk, [=] HD(long i) {
             jx[i] = jx[i] + nw[i] - old[i]; jy[i] = jy[i] + nw[nkk + i] - old[nkk + i]; jz[i] = jz[i] + nw[2 * nkk + i] - old[2 * nkk + i];
             old[i] = nw[i]; old[nkk + i] = nw[nkk + i]; old[2 * nkk + i] = nw[2 * nkk + i];
@@ -409,12 +262,19 @@ void Simulation::march_plasma(double s0, double s1) {
     cpx* pin = jpred.data();         // streaming part now inside jk(n-1)
     cpx* tmp = jtmp.data();
     cpx* dl = dlt.data();            // change s0 -> s1 of half-cell n+1 (extrapolation)
-    // front: half-cell N-2 predicted with its value of level s0
+    bool have_dl = false;
     jpred.zero();
-    copy3(tmp, js0x.data() + (N - 1) * nkk, js0y.data() + (N - 1) * nkk, js0z.data() + (N - 1) * nkk);
-    replace(N - 2, pin, tmp);
-    march_slice(N - 1, D);
-    real_fields_slice(N - 1);
+    if (top) {                       // front: half-cell N-2 predicted with its value of level s0
+        copy3(tmp, js0x.data() + hpl(N - 2), js0y.data() + hpl(N - 2), js0z.data() + hpl(N - 2));
+        replace(N - 2, pin, tmp);
+        march_slice(N - 1, D);
+        real_fields_slice(N - 1);
+    } else {                         // slice b was solved above with this prediction of half-cell b-1
+        dlt.from_host(&pk[9 * pl], 0, 3 * pl);
+        jtmp.from_host(&pk[6 * pl], 0, 3 * pl);
+        replace(b - 1, pin, tmp);
+        have_dl = true;
+    }
 
     StreamCtx sc;
     {
@@ -422,7 +282,7 @@ void Simulation::march_plasma(double s0, double s1) {
         c.F = F.data(); c.a = a; c.ns = ns; c.N = N; c.nx = cfg.nx; c.ny = cfg.ny; c.nk = nk; c.self = 1;
         c.yf = yf; c.dx = dx; c.dy = dy; c.Lx = cfg.Lx; c.Ly = cfg.Ly; c.zax = zax; c.yax = yax; c.laser = laser; c.X0 = X0;
         c.zc = cfg.zeta_center; c.dz_push = cfg.dz_push; c.push_phase = cfg.push_phase; c.zhand = -1e300;
-        c.zmax = cfg.zeta[N - 1]; c.s1 = s1; c.vz_min = 0; c.freeze = 0;
+        c.zmax = cfg.zeta[N - 1]; c.s1 = s1; c.vz_min = 0; c.freeze = 0; c.hmin = 1e300; c.Y0 = Y0; c.ext = external();
         c.ylo = yf ? -1e300 : cfg.ynode[1]; c.yhi = yf ? 1e300 : cfg.ynode[cfg.ny - 1];
     }
     sc.zs = zs.data(); sc.J = jsr.data(); sc.ia = iA.data(); sc.id = iD.data();
@@ -431,22 +291,21 @@ void Simulation::march_plasma(double s0, double s1) {
     const bool ionz = born_cap > 0;
     const uint64_t key_step = ion_key_step(cfg.seed, istep);
     const int passes = cfg.iterations;
-    bool have_dl = false;
-    for (int n = N - 2; n >= 0; --n) {
-        const long hp = (n + 1) * nkk;           // plane of half-cell n
+    for (int n = nhi; n >= a; --n) {
+        const long hp = hpl(n);                   // plane of half-cell n
         cpx* sin_ = jsin.data();                  // streaming part inside jk(n): the prediction so far
         par_for(3 * nkk, [=] HD(long i) { sin_[i] = pin[i]; });
         cpx* si0 = jsi0.data();                   // ... as used by the solve of slice n+1 (for the correction)
         par_for(3 * nkk, [=] HD(long i) { si0[i] = pin[i]; });
         if (n >= 1) {                             // start of the prediction of half-cell n-1: its level s0
             jpred.zero();
-            copy3(tmp, js0x.data() + n * nkk, js0y.data() + n * nkk, js0z.data() + n * nkk);
+            copy3(tmp, js0x.data() + hpl(n - 1), js0y.data() + hpl(n - 1), js0z.data() + hpl(n - 1));
             replace(n - 1, pin, tmp);
         }
         if (passes > 1) {
             int k = 0;
             for (Buf<cpx>* p : {&Rx, &Ry, &Ez, &Bz}) {
-                cpx* dst = bk.data() + (k++) * nkk; const cpx* src = p->data() + n * nkk;
+                cpx* dst = bk.data() + (k++) * nkk; const cpx* src = p->data() + spl(n);
                 par_for(nk, [=] HD(long i) { dst[i] = src[i]; });
             }
             Particle* d = strm_bk.data(); const Particle* sp_ = strm.data();
@@ -458,7 +317,7 @@ void Simulation::march_plasma(double s0, double s1) {
             if (pass > 0) {
                 int k = 0;
                 for (Buf<cpx>* p : {&Rx, &Ry, &Ez, &Bz}) {
-                    cpx* dst = p->data() + n * nkk; const cpx* src = bk.data() + (k++) * nkk;
+                    cpx* dst = p->data() + spl(n); const cpx* src = bk.data() + (k++) * nkk;
                     par_for(nk, [=] HD(long i) { dst[i] = src[i]; });
                 }
                 Particle* d = strm.data(); const Particle* sp_ = strm_bk.data();
@@ -479,7 +338,7 @@ void Simulation::march_plasma(double s0, double s1) {
             replace(n, sin_, jsn.data());
             if (n >= 1 && extrap) {               // prediction of half-cell n-1 = s0 + change, extrapolated
                 const cpx *u = jsn.data(), *sx = js0x.data() + hp, *sy = js0y.data() + hp, *sz = js0z.data() + hp;
-                const cpx *px_ = js0x.data() + n * nkk, *py_ = js0y.data() + n * nkk, *pz_ = js0z.data() + n * nkk;
+                const cpx *px_ = js0x.data() + hpl(n - 1), *py_ = js0y.data() + hpl(n - 1), *pz_ = js0z.data() + hpl(n - 1);
                 const double w = wex;
                 par_for(nk, [=] HD(long i) {
                     const cpx d0 = u[i] - sx[i], d1 = u[nkk + i] - sy[i], d2 = u[2 * nkk + i] - sz[i];
@@ -520,8 +379,11 @@ void Simulation::march_plasma(double s0, double s1) {
         }
         {   // half-cell n is final: correct R at slice n+1 for the prediction it used, keep the change for the
             // extrapolation and the current as the prediction of the next step
+            // (slice b belongs to the rank above: its correction and the current go up)
             const double q = D * cfg_wlo_[n + 1];
-            cpx* rx = Rx.data() + (n + 1) * nkk; cpx* ry = Ry.data() + (n + 1) * nkk;
+            const bool own = n + 1 < b;
+            cpx* rx = own ? Rx.data() + spl(n + 1) : tmp; cpx* ry = own ? Ry.data() + spl(n + 1) : tmp + nkk;
+            if (!own) jtmp.zero();
             cpx *sx = js0x.data() + hp, *sy = js0y.data() + hp, *sz = js0z.data() + hp;
             const cpx* u = jsn.data();
             par_for(nk, [=] HD(long i) {
@@ -531,7 +393,42 @@ void Simulation::march_plasma(double s0, double s1) {
             });
             device_sync();
             have_dl = true;
+            if (!own) {                           // package up: -correction of R_x, R_y at slice b; the current
+                std::vector<cpx> up(5 * pl);
+                jtmp.to_host(up.data(), 0, 2 * pl);
+                jsn.to_host(&up[2 * pl], 0, 3 * pl);
+                comm.isend(comm.rank + 1, TAG_PUP, up.data(), up.size());
+            }
         }
+    }
+    std::vector<Particle> trap_below;             // electrons trapped in half-cell a: beam list of the rank below
+    if (!bottom) {                                // package down: particles at zeta_a, slice a, prediction, change
+        std::vector<Particle> sv(static_cast<size_t>(nstrm)), keep, down;
+        strm.to_host(sv.data(), 0, sv.size());
+        for (const auto& p : sv) (p.alive == 1 ? down : keep).push_back(p);
+        comm.isend(comm.rank - 1, TAG_PPART, down.data(), down.size());
+        std::vector<cpx> pd(12 * pl);
+        int k = 0;
+        for (Buf<cpx>* p : {&Rx, &Ry, &Ez, &Bz, &Lx, &Ly}) p->to_host(&pd[pl * k++], 0, pl);
+        jpred.to_host(&pd[6 * pl], 0, 3 * pl);
+        dlt.to_host(&pd[9 * pl], 0, 3 * pl);
+        comm.isend(comm.rank - 1, TAG_PDOWN, pd.data(), pd.size());
+        std::vector<float> fd(6 * pl);
+        for (int c = 0; c < 6; ++c) F.to_host(&fd[c * pl], size_t(c) * (ns + 2) * pl, pl);
+        comm.isend(comm.rank - 1, TAG_PDOWNF, fd.data(), fd.size());
+        nstrm = long(keep.size());
+        strm.from_host(keep.data(), 0, keep.size());
+        // package from below: the correction of R at slice a and the final current of half-cell a-1
+        std::vector<cpx> up(5 * pl);
+        comm.recv(comm.rank - 1, TAG_PUP, up.data(), up.size());
+        jtmp.from_host(&up[2 * pl], 0, 3 * pl);
+        replace(a - 1, pin, tmp);                 // jk(a-1): beam + final streaming current
+        cpx *gx = js0x.data(), *gy = js0y.data(), *gz = js0z.data();
+        par_for(nk, [=] HD(long i) { gx[i] = tmp[i]; gy[i] = tmp[nkk + i]; gz[i] = tmp[2 * nkk + i]; });
+        jtmp.from_host(up.data(), 0, 2 * pl);
+        cpx* rx = Rx.data(); cpx* ry = Ry.data();
+        par_for(nk, [=] HD(long i) { rx[i] = rx[i] + tmp[i]; ry[i] = ry[i] + tmp[nkk + i]; });
+        device_sync();
     }
     // trapped particles: fast ones join the beam list, slow ones stream again in the next step
     std::vector<Particle> sv(static_cast<size_t>(nstrm));
@@ -550,9 +447,14 @@ void Simulation::march_plasma(double s0, double s1) {
         if (p.alive != 5) continue;
         const double g = std::sqrt(1 + p.px * p.px + p.py * p.py + p.pz * p.pz);
         p.z = s1;
-        if (p.pz / g >= cfg.vz_beam) { p.alive = 1; p.sp = trapped_species(p.sp); add.push_back(p); ++trapped_total; }
+        if (p.pz / g >= cfg.vz_beam) {
+            p.alive = 1; p.sp = trapped_species(p.sp); ++trapped_total;
+            (!bottom && p.zeta < cfg.zeta[a + 1] ? trap_below : add).push_back(p);   // beam half-cells [a+1, b]
+        }
         else { p.alive = 6; joining_.push_back(p); }
     }
+    if (!bottom) comm.isend(comm.rank - 1, TAG_PTRAP, trap_below.data(), trap_below.size());
+    if (!top) for (const auto& p : comm.recv_vec<Particle>(comm.rank + 1, TAG_PTRAP)) add.push_back(p);
     if (!add.empty()) {
         std::vector<Particle> all = host_particles(), keep;
         keep.reserve(all.size() + add.size());
@@ -566,15 +468,47 @@ void Simulation::march_plasma(double s0, double s1) {
     device_sync();
 }
 
-// the beam particles that became slower than vz_min stream in the current march
+// the beam particles that became slower than vz_min stream in the current march (MPI: those in half-cell b of
+// the beam list of this rank are marched by the rank above; collective with the neighbours)
 void Simulation::collect_restreaming() {
-    std::vector<Particle> all = host_particles(), keep;
+    std::vector<Particle> all = host_particles(), keep, up;
     bool any = false;
     for (auto& p : all) if (p.alive == 4) { any = true; break; }
-    if (!any) return;
-    for (auto& p : all) {
-        if (p.alive == 4) { Particle q = p; q.alive = 6; joining_.push_back(q); ++restreamed_total; }
-        else if (p.alive == 1) keep.push_back(p);
+    const bool top = comm.rank == comm.size - 1;
+    if (any) {
+        for (auto& p : all) {
+            if (p.alive == 4) {
+                Particle q = p; q.alive = 6; ++restreamed_total;
+                (!top && q.zeta >= cfg.zeta[b] ? up : joining_).push_back(q);
+            } else if (p.alive == 1) keep.push_back(p);
+        }
+        set_particles(keep);
     }
-    set_particles(keep);
+    if (comm.size == 1) return;
+    if (!top) comm.isend(comm.rank + 1, TAG_RESTR, up.data(), up.size());
+    if (comm.rank > 0) for (const auto& p : comm.recv_vec<Particle>(comm.rank - 1, TAG_RESTR)) joining_.push_back(p);
+}
+
+// The densities of the half-cells of all ranks on rank 0 (collective; each rank marches the half-cells a ... b-1,
+// the top rank up to N-2): the lines y = 0 and x = 0 [N][nx + ny], and the whole planes [N-1][nk].
+std::vector<double> Simulation::halfcell_lines(const Buf<double>& lines) {
+    if (comm.size == 1 || !lines.size()) return lines.host();
+    const size_t L = size_t(cfg.nx + cfg.ny);
+    const int nhi = comm.rank == comm.size - 1 ? N - 2 : b - 1;
+    std::vector<double> mine(size_t(nhi - a + 1) * L);
+    lines.to_host(mine.data(), size_t(a) * L, mine.size());
+    std::vector<char> all = comm.gather_bytes(mine.data(), mine.size() * sizeof(double));
+    std::vector<double> v(size_t(N) * L, 0.0);
+    if (comm.rank == 0) std::memcpy(v.data(), all.data(), all.size());
+    return v;
+}
+std::vector<float> Simulation::halfcell_planes(const Buf<float>& full) {
+    if (comm.size == 1 || !full.size()) return full.host();
+    const int nhi = comm.rank == comm.size - 1 ? N - 2 : b - 1;
+    std::vector<float> mine(size_t(nhi - a + 1) * nk);
+    full.to_host(mine.data(), size_t(a) * nk, mine.size());
+    std::vector<char> all = comm.gather_bytes(mine.data(), mine.size() * sizeof(float));
+    std::vector<float> v(size_t(N - 1) * nk, 0.0f);
+    if (comm.rank == 0) std::memcpy(v.data(), all.data(), all.size());
+    return v;
 }

@@ -14,6 +14,9 @@
 
 namespace {
 constexpr double c_SI = 299792458.0, e_SI = 1.602176634e-19, me_SI = 9.1093837015e-31, eps0 = 8.8541878128e-12;
-enum Tag { TAG_HAND = 11, TAG_CUR = 12, TAG_BND = 13, TAG_GHOST = 14, TAG_TRIF = 15, TAG_TRIB = 16, TAG_JZU = 17, TAG_JZD = 18 };
+enum Tag { TAG_HAND = 11, TAG_CUR = 12, TAG_BND = 13, TAG_GHOST = 14, TAG_TRIF = 15, TAG_TRIB = 16, TAG_JZU = 17, TAG_JZD = 18,
+           // plasma march along the ranks: package down (fields, prediction; real fields; streaming particles;
+           // trapped electrons for the beam list below), package up (correction of R, final current), restreaming
+           TAG_PDOWN = 19, TAG_PDOWNF = 20, TAG_PPART = 21, TAG_PTRAP = 22, TAG_PUP = 23, TAG_RESTR = 24 };
 HD inline bool is_half(int comp) { return comp == 1 || comp == 3 || comp == 5; }   // E_y, B_x, B_z
 }  // namespace

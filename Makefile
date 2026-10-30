@@ -6,8 +6,8 @@
 # make FFTW=1          CPU build with FFTW 3 instead of the own FFT (-lfftw3 -lfftw3_omp)
 # make physics         larger physics checks (ion collapse), minutes on a GPU or a 24-core node
 # make HDF5=1          openPMD output (output.format = openpmd) with HDF5 (pkg-config hdf5); combine with the others
-SIM = src/sim_config.cpp src/sim_setup.cpp src/sim_particles.cpp src/sim_fields.cpp src/sim_plasma.cpp src/sim_ions.cpp src/sim_bunches.cpp src/sim_output.cpp
-SRC = src/deck.cpp src/grid.cpp $(SIM) src/comm.cpp src/openpmd.cpp src/atomic_data.cpp src/ionization.cpp
+SIM = src/sim_config.cpp src/sim_setup.cpp src/sim_particles.cpp src/sim_fields.cpp src/sim_plasma.cpp src/sim_ions.cpp src/sim_bunches.cpp src/sim_external.cpp src/sim_checkpoint.cpp src/sim_output.cpp
+SRC = src/deck.cpp src/grid.cpp $(SIM) src/comm.cpp src/openpmd.cpp src/atomic_data.cpp src/ionization.cpp src/expr.cpp
 HDR = $(wildcard src/*.hpp src/emu/*.h)
 BUILD ?= build
 ifeq ($(CUDA),1)
@@ -48,7 +48,7 @@ all: $(BUILD)/gempic3d $(BUILD)/tests
 $(BUILD)/gempic3d: $(SRC) src/main.cpp $(HDR)
 	@mkdir -p $(BUILD)
 	$(CXX) $(CXXFLAGS) -o $@ $(SRC) src/main.cpp $(LDLIBS)
-TESTS = tests/tests.cpp tests/test_fields.cpp tests/test_bunch.cpp tests/test_plasma.cpp tests/test_ions.cpp tests/test_ionization.cpp tests/test_bunches.cpp
+TESTS = tests/tests.cpp tests/test_fields.cpp tests/test_bunch.cpp tests/test_plasma.cpp tests/test_ions.cpp tests/test_ionization.cpp tests/test_bunches.cpp tests/test_external.cpp tests/test_expr.cpp tests/test_checkpoint.cpp
 $(BUILD)/tests: $(SRC) $(TESTS) tests/test_util.hpp $(HDR)
 	@mkdir -p $(BUILD)
 	$(CXX) $(CXXFLAGS) -Isrc -o $@ $(SRC) $(TESTS) $(LDLIBS)

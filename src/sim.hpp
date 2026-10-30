@@ -18,6 +18,7 @@
 #include "fftmany.hpp"
 #include "grid.hpp"
 #include "ionization.hpp"
+#include "external.hpp"
 #include "portable.hpp"
 
 // an ion species on the device: mass [m_e], mobile, ionizing, highest charge state, offset of its levels in the ADK
@@ -68,6 +69,12 @@ struct Config {
     std::vector<Bunch> bunches;
     std::vector<Bunch> bunch_list() const;             // `bunches`, or the single bunch of the fields above
     void parse_bunches(const Deck& d);                 // sim_bunches.cpp
+    // undulators and transport elements (blocks undulator, quadrupole, plasma_lens, solenoid; code units)
+    std::vector<Undulator> undulators;
+    std::vector<Magnet> magnets;
+    std::vector<double> ktab;                          // tapers (K_function): B0(z) tables of the undulators
+    void parse_external(const Deck& d);                // sim_external.cpp
+    void summary_external(FILE* f) const;
     // grid lasers (laser blocks with type = gaussian): paraxial Gaussian pulses on the grid
     struct GridLaser {
         double a0 = 1, kL = 1, waist = 10, tau = 10, zeta_c = 0, z_focus = 0, cep = 0, pol_angle = 0;
@@ -80,6 +87,7 @@ struct Config {
     double n0 = 0, r_max = 1e300, channel_depth = 0, r_channel = 1, smooth_length = 0;
     std::vector<double> pz_points, pz_values;
     bool parabolic = false;
+    Expr density_fn;                                  // plasma.density_function(x, y, z, r): a factor (< 0 counts as 0)
     int ppc_x = 2, ppc_y = 2;
     // streaming particles (as in GEM-PIC-RZ): passes per slice, trapping and return to streaming
     int iterations = 2;
@@ -120,6 +128,8 @@ struct Config {
     int every = 10;
     bool dump_particles = true;
     bool frames = false;                               // output.frames: frame_NNNNN.bin every output step (GUI)
+    int checkpoint_every = 0;                          // output.checkpoint_every: steps between checkpoints (0: none)
+    double walltime_hours = 0;                         // output.walltime_hours: checkpoint and stop before this limit
     // output groups, as in QUARZ: [0] the main output (block output), then the diagnostics named in diag.names
     // (blocks diag.<name>), each with its own period, selection of fields and beams, and format
     struct OutGroup {
@@ -200,6 +210,11 @@ public:
     void write_openpmd(const Config::OutGroup& g, bool fields, bool beams);
     void write_beams_native(const Config::OutGroup& g);   // collective: beam_<species>_NNNNNN.txt
     void write_outputs(bool start);                // collective: the groups due at this step
+    // checkpoints (sim_checkpoint.cpp): write after a step (collective), read instead of init(), newest complete
+    std::string checkpoint_file(long step, int rank) const;
+    void write_checkpoint();
+    void read_checkpoint(long step);
+    long latest_checkpoint();
     Buf<float> rho_full;                     // plasma charge density of every half-cell (openPMD n_e), [N-1][nk]
     Buf<float> rho_full_i;                   // the same for the mobile ions (openPMD n_i)
 
@@ -265,6 +280,12 @@ public:
     long born_cap = 0;
     std::vector<std::vector<double>> ion_stats;
     void setup_ions();
+    Buf<Undulator> und_dev;
+    Buf<Magnet> mag_dev;
+    Buf<double> ktab_dev;
+    External external() const {
+        return External{int(cfg.undulators.size()), int(cfg.magnets.size()), und_dev.data(), mag_dev.data(), ktab_dev.data()};
+    }
     void write_ionization(FILE* f, bool header);     // ionization.txt (rank 0)
     std::vector<double> cfg_wlo_;            // host copy of wlo
 
@@ -286,8 +307,10 @@ public:
     void shift_window(int nxs, int nys);
     double local_field_energy();
     void setup_plasma();
-    void load_plasma(double s0, double s1, const std::vector<Particle>& joining);
+    void load_plasma(double s0, double s1, const std::vector<Particle>& joining, const std::vector<Particle>* arriving);
     void stream_spectra();
+    std::vector<double> halfcell_lines(const Buf<double>& lines);   // collective: rho lines of all ranks on rank 0
+    std::vector<float> halfcell_planes(const Buf<float>& full);     // collective: rho planes of all ranks on rank 0
     void march_slice(int n, double D);
     void real_fields_slice(int n);
     void march_plasma(double s0, double s1);

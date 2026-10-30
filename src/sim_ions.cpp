@@ -89,7 +89,15 @@ void Simulation::setup_ions() {
 // ionization.txt (rank 0, one line per step and ionizing species): step, z [mm], name, mean charge state and the
 // charge-state fractions of the ions that left the window in this step, charge freed in this step [pC]
 void Simulation::write_ionization(FILE* f, bool header) {
-    if (!f || !cfg.ionizing()) return;
+    if (!cfg.ionizing()) return;
+    if (!header && comm.size > 1)                       // collective: sums over the ranks
+        for (size_t k = 0; k < cfg.ions.size(); ++k) {
+            if (!cfg.ions[k].ionization) continue;
+            std::vector<double>& h = ion_stats[k];
+            if (h.empty()) h.assign(cfg.ions[k].Zmax + 2, 0.0);
+            comm.allreduce_sum(h.data(), int(h.size()));
+        }
+    if (!f) return;
     if (header) {
         std::fprintf(f, "# GEM-PIC-3D ionization: ions leaving the window per step\n# step z_mm name <Z> freed_pC f(0) f(1) ... f(Zmax)\n");
         return;

@@ -1,7 +1,7 @@
 // GPU emulator check of the 3D beam wake (tests/test_plasma.cpp, beam_wake_axis) on a reduced grid
 // (32 x 32 modes, dzeta = 1, 10 steps; the full check needs > 30 min in the emulator). Build it once without and
 // once with -DGEMPIC_EMU and compare the two output files: E_z on the axis must agree bit for bit.
-//   S="src/deck.cpp src/grid.cpp src/sim_*.cpp src/comm.cpp src/openpmd.cpp src/atomic_data.cpp src/ionization.cpp tests/test_plasma.cpp"
+//   S="src/deck.cpp src/grid.cpp src/sim_*.cpp src/comm.cpp src/openpmd.cpp src/atomic_data.cpp src/ionization.cpp src/expr.cpp tests/test_plasma.cpp"
 //   g++ -O3 -std=c++17 -fopenmp -Isrc -Itests -o cmp_cpu $S tests/emu_wake.cpp && ./cmp_cpu wake_cpu.txt
 //   g++ -O3 -std=c++17 -fopenmp -DGEMPIC_EMU -Isrc -Itests -o cmp_emu $S tests/emu_wake.cpp && ./cmp_emu wake_emu.txt
 //   cmp wake_cpu.txt wake_emu.txt

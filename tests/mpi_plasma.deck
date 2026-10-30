@@ -1,0 +1,68 @@
+# MPI check with plasma (tests/mpi.sh): a0 = 2.5 grid laser in a plasma with an up-ramp, mobile H+ ions, N5+
+# ionized by the laser (ADK), a witness bunch and a dense driver; streaming particles, the prediction of the
+# streaming current and the corrections cross the block edges of 2, 3, 4 ranks.
+grid {
+  lambda0       = 0.8 um
+  nx            = 32
+  ny            = 32
+  Lx            = 40 um
+  sponge        = 4 um
+  nzeta         = 321
+  window_length = 40 um
+  dz            = 5 um
+  z_end         = 60 um
+  move_x        = false
+  move_y        = false
+}
+laser {
+  type        = gaussian
+  a0          = 2.5
+  waist       = 8 um
+  tau_fwhm    = 20 fs
+  zeta_center = 33 um
+  z_focus     = 40 um
+}
+plasma {
+  density       = 8e18 cm^-3
+  z_points      = 0, 20 um
+  z_values      = 0.2, 1
+  ppc_x         = 1
+  ppc_y         = 1
+  smooth_length = 0.2 um
+}
+ion {
+  element  = H
+  fraction = 0.9
+}
+ion {
+  element      = N
+  charge_state = 5
+  density      = 1.6e17 cm^-3
+  ionization   = adk
+  mobile       = false
+}
+bunch {
+  name           = witness
+  charge         = 10 pC
+  gamma          = 100
+  sigma_x        = 1 um
+  sigma_z        = 1 um
+  zeta_center    = 14 um
+  macroparticles = 4000
+}
+bunch {
+  name           = driver
+  species        = positron
+  charge         = 50 pC
+  gamma          = 1000
+  sigma_x        = 2 um
+  distribution_z = flattop
+  length         = 3 um
+  zeta_center    = 6 um
+  macroparticles = 4000
+}
+output {
+  every     = 3
+  particles = false
+  axis      = true
+}

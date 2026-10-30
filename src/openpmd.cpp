@@ -47,9 +47,9 @@ void Simulation::write_openpmd(const Config::OutGroup& g, bool fields, bool beam
         }
     }
     std::vector<float> rh;
-    if (want_ne && comm.rank == 0) rh = rho_full.host();      // plasma: one rank
+    if (want_ne) rh = halfcell_planes(rho_full);              // collective
     std::vector<float> rhi;
-    if (want_ni && comm.rank == 0) rhi = rho_full_i.host();
+    if (want_ni) rhi = halfcell_planes(rho_full_i);
     // ---- particles to rank 0
     std::vector<Particle> P;
     if (particles) {

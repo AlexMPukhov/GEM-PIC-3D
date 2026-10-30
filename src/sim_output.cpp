@@ -28,6 +28,7 @@ void Simulation::diagnostics(FILE* f, bool header) {
     auto rms = [&](int k, int k2) { return std::sqrt(std::max(0.0, m(k2) - m(k) * m(k))); };
     const double eta_rel = laser.on ? (m(13) - laser.eta_c) / laser.tau : 0;
     if (laser.on && cfg.stop_fwhm > 0 && eta_rel > cfg.stop_fwhm) stop_ = true;
+    const std::vector<double> rzi = rho_lines_i.size() ? halfcell_lines(rho_lines_i) : std::vector<double>();   // collective
     if (comm.rank != 0) return;
     const double um = cfg.Lu * 1e6;
     const double aenv = laser.on ? laser.a0 * laser.envelope(m(13)) : 0;
@@ -39,8 +40,8 @@ void Simulation::diagnostics(FILE* f, bool header) {
     std::snprintf(line, sizeof line, "%6ld %10.5f %8ld %10.4f %10.4f %10.4f %9.4f %9.4f %9.4f %12.6e %12.6e %14.8e %14.8e %14.8e %11.4e %8.4f %8.4f %11.4e %11.4e %8ld %11.4e\n",
                  istep, s * cfg.Lu * 1e3, long(S[14]), m(1) * um, m(2) * um, m(3) * um, rms(1, 4) * um, rms(2, 5) * um,
                  rms(3, 6) * um, m(7), m(8), m(9), m(10), m(11), rms(9, 12), eta_rel, aenv, Wf, Wk, long(S[17]), Qtr);
-    if (rho_lines_i.size()) {             // largest mobile-ion charge density on the axis (ion collapse)
-        const std::vector<double> rl = rho_lines_i.host();
+    if (!rzi.empty()) {                   // largest mobile-ion charge density on the axis (ion collapse)
+        const std::vector<double>& rl = rzi;
         const int nx = cfg.nx, i0 = ((int(std::lround(-X0 / dx)) % nx) + nx) % nx;
         double mx = 0;
         for (int n = 0; n + 1 < N; ++n) mx = std::max(mx, rl[size_t(n) * (nx + cfg.ny) + i0] / cfg.n0);
@@ -117,6 +118,9 @@ void Simulation::write_frame(const std::string& file, int comps) {
             for (int j = 0; j < ny; ++j) o[nx + j] = P[long(j) * nx + i0];
         }
     std::vector<char> all = comm.gather_bytes(mine.data(), mine.size() * sizeof(float));
+    std::vector<double> rle, rli;                        // densities of all ranks (collective)
+    if (cfg.plasma_on && (comps >> 6 & 1)) rle = halfcell_lines(rho_lines);
+    if (rho_lines_i.size() && (comps >> 7 & 1)) rli = halfcell_lines(rho_lines_i);
     if (comm.rank != 0) return;
     const float* A = reinterpret_cast<const float*>(all.data());
     const double um = cfg.Lu * 1e6;
@@ -163,7 +167,7 @@ void Simulation::write_frame(const std::string& file, int comps) {
     }
     for (int sgn = 0; sgn < 2; ++sgn) {                  // n_e / n0, Z n_i / n0 at the slices: mean of the half-cells
         if (!(sgn ? idens : dens)) continue;
-        const std::vector<double> rl = (sgn ? rho_lines_i : rho_lines).host();
+        const std::vector<double>& rl = sgn ? rli : rle;
         const int L = nx + ny;
         auto at = [&](int n, int k) {
             const double lo = n > 0 ? rl[size_t(n - 1) * L + k] : 0, hi = n < N - 1 ? rl[size_t(n) * L + k] : 0;
@@ -197,11 +201,11 @@ void Simulation::write_axis(const std::string& file) {
         mine[3 * l + 2] = hv(1) + hv(3);
     }
     std::vector<char> all = comm.gather_bytes(mine.data(), mine.size() * sizeof(double));
+    std::vector<double> rl, rli;                         // densities of all ranks (collective)
+    if (cfg.plasma_on) rl = halfcell_lines(rho_lines);
+    if (rho_lines_i.size()) rli = halfcell_lines(rho_lines_i);
     if (comm.rank != 0) return;
     const double* A = reinterpret_cast<const double*>(all.data());
-    std::vector<double> rl, rli;
-    if (cfg.plasma_on) rl = rho_lines.host();
-    if (rho_lines_i.size()) rli = rho_lines_i.host();
     const int L = nx + ny;
     FILE* f = std::fopen(file.c_str(), "w");
     if (!f) throw std::runtime_error("cannot write " + file);
