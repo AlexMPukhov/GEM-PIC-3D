@@ -37,13 +37,13 @@
 \begin{center}
 {\LARGE\bfseries GEM-PIC-3D: method, implementation and tests}\\[1.2ex]
 {\large A.~Pukhov}\\[0.6ex]
-{\small 19 October 2026 \quad$\cdot$\quad \href{https://github.com/AlexMPukhov/GEM-PIC-3D}{github.com/AlexMPukhov/GEM-PIC-3D}, commit \code{9e3efe8}}
+{\small 19 October 2026, updated 30 October 2026 \quad$\cdot$\quad \href{https://github.com/AlexMPukhov/GEM-PIC-3D}{github.com/AlexMPukhov/GEM-PIC-3D}, branch \code{plasma}}
 \end{center}
 \vspace{1ex}
 
 \section{Summary}
 
-GEM-PIC-3D is a Galilean electromagnetic particle-in-cell code in three dimensions, written from scratch on the model of GEM-PIC-RZ. All 18 checks against analytic references pass.
+GEM-PIC-3D is a Galilean electromagnetic particle-in-cell code in three dimensions, written from scratch on the model of GEM-PIC-RZ. This report describes the first version (18 checks); Section~\ref{sec:v2} summarizes version 2, which adds the plasma, ion and beam-line physics of GEM-PIC-RZ, free-hand grids, MPI, the GPU build and 105 checks.
 
 The transverse directions are Fourier modes, so the field solve of a slice is a closed-form scalar problem per $(k_x,k_y)$. The laser is an analytic plane wave acting on the particles directly, and the grid carries only the bunch's self-fields and radiation. The code is about 1\,150 lines of C++17 with no external libraries.
 
@@ -229,6 +229,66 @@ File & Content\\
 The macroparticles are written at the start and at the end.
 
 \clearpage
+\section{Version 2 (October 2026)}\label{sec:v2}
+
+The other sections describe the first version. Since then the code has grown into a 3D counterpart of GEM-PIC-RZ: about 5\,900 lines of C++17, on the branch \code{plasma}. The README holds the equations and the deck reference (\code{docs/input\_deck.md}); this section summarizes the additions and their validation.
+
+\textbf{Grids and parallelism.}
+\begin{itemize}
+\item \textbf{Free-hand grids:} $y$ may be a finite-difference grid between conducting walls (one tridiagonal solve per $k_x$); $\zeta$ may be free-hand in either case. FFTs of any size (mixed radix, Bluestein; optional FFTW).
+\item \textbf{One source for CPU and GPU:} every kernel is a lambda that runs as an OpenMP loop or a CUDA kernel. The first runs on a real GPU (RTX 5090, CUDA 13) agree with the CPU build to rounding, and the 3D beam wake bit for bit. The GPU is 9--12 times faster than 20 CPU threads (Table~\ref{tab:perf}).
+\item \textbf{MPI along $\zeta$}, also with plasma. The streaming particles cross the whole window in one march, so the march runs down the ranks: a package down carries the particles, the boundary slice and the prediction of the streaming current; a package up carries the correction of $R$ at the block edge and the final current. 2, 3 and 4 ranks reproduce one rank in every printed digit.
+\item \textbf{Checkpoints} per rank, restart with \code{--restart latest}, and a wall-time limit with exit code 3.
+\end{itemize}
+
+\textbf{Physics (as GEM-PIC-RZ).}
+\begin{itemize}
+\item \textbf{Streaming plasma:} electrons stream through the window slice by slice (Boris push, $\mathrm d t=h/(1-v_z)$, two passes per slice), trap into the beam list, and return to streaming when slow. The streaming current of the next half-cell is predicted from the previous level plus its extrapolated change, which keeps the scheme stable at $\Delta=200\,k_0^{-1}$. Bubble closure by smoothing; grid lasers.
+\item \textbf{Mobile ions and field ionization:} ion species with NIST masses and ionization energies, ADK rates, Monte Carlo with counter-based random numbers (CPU and GPU draw the same numbers), freed electrons that stream and are trapped as \code{inj\_<name>}.
+\item \textbf{Bunches and beam line:} several electron or positron bunches, undulators (planar, helical, tapered), quadrupoles, plasma lenses, solenoids, a thin chicane.
+\item \textbf{Deck:} expressions and constants, profiles as functions, output groups and openPMD 1.1.0.
+\end{itemize}
+
+\begin{table}[H]
+\centering\small
+\caption{Seconds per step (version 2).}\label{tab:perf}
+\begin{tabular}{@{}l c c c@{}}
+\toprule
+Run & RTX 5090 & 20 Xeon threads & 24 Ivy Bridge threads\\
+\midrule
+LWFA, $64\times64\times1201$, 4 electrons per cell & 0.42 & 3.9 & 3.05\\
+oblique plane wave, $256\times128\times1601$, $4\times10^5$ macroparticles & 0.23 & 2.7 & 2.65\\
+\bottomrule
+\end{tabular}
+\end{table}
+With plasma, MPI saves memory per rank but not time: the LWFA example takes 3.3\,s per step on one rank with 24 threads and 4.3\,s on four ranks with 6 threads each.
+
+\textbf{Validation.} \code{make test} has 105 checks against independent references (CPU and GPU), \code{make physics} the ion collapse, and scripts check MPI, checkpoints, openPMD and the GUI. Table~\ref{tab:v2} lists the main additions.
+
+\begin{table}[H]
+\centering\small
+\caption{Main checks of version 2.}\label{tab:v2}
+\begin{tabularx}{\textwidth}{@{}L L >{\raggedright\arraybackslash}p{3.2cm}@{}}
+\toprule
+Check & Reference & Result\\
+\midrule
+1D laser wake, $a_0=0.05$, $n_0=0.01\,n_c$ & cold-fluid theory & 0.8\,\% amplitude\\
+3D wake of a narrow rigid bunch & linear theory of the discrete scheme (TSC response $k_pS(k)$) & 1.9\,\% rms\\
+ion collapse in a bunch with $n_b=100\,n_0$, H and D & radial test-ion model with full blowout & 1.7\,\%, 0.7\,\%\\
+H and N$^{5+}\to$N$^{7+}$ in a plane-wave pulse & ADK rate equations & 0.7\,\%; 1--3\,\%\\
+undulator: orbit, slippage, natural focusing & $u_x=K\sin\psi$; $\int(\gamma-p_z)/p_z\,\mathrm dz$; $k_\beta=Kk_u/\sqrt2\gamma$ & $10^{-6}$; $7\times10^{-6}$; $3\times10^{-4}$\\
+coherent undulator emission (\code{make physics}) & far-field radiation integral (Jackson 14.65) with the bunch form factor & $-1.9$\,\%; converged $+0.6$\,\%\\
+quadrupole, plasma lens, solenoid & thick-lens optics; canonical angular momentum & $10^{-7}$; $4\times10^{-8}$\\
+MPI with plasma, ions, ionization, trapping & one rank & identical\\
+checkpoint and restart & uninterrupted run & identical\\
+real GPU & CPU build & rounding\\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\textbf{Errors found on the way}, each now fixed and covered by a check: beam particles that became slower than \code{vz\_min} were dropped with MPI; a push sub-step could move a slow trapped electron beyond the slices of its rank, where the gathered field is zero (the sub-step now moves a particle by at most half a cell in $\zeta$); the RK4 push lost an order at the fringes of solenoids and undulator ramps (the sub-steps now end on the breakpoints of the elements); a grid laser without plasma crashed.
+
+\clearpage
 \section{Tests}\label{sec:tests}
 
 All 18 checks of \code{make test} pass, each against an independent analytic reference; the suite takes a few minutes on one core.
@@ -300,14 +360,14 @@ One further finding is a constraint on use rather than an error. The pulse must 
 
 \section{Limits and next steps}
 
-The code is validated for fields, single-particle dynamics and bunch self-fields, but not yet for radiation energy balance. That check comes before any physics result.
+The code is validated for fields, single-particle dynamics, bunch self-fields, plasma wakes, ions and ionization, and the radiation energy balance of coherent undulator emission (Section~\ref{sec:v2}).
 \begin{itemize}
 \item \textbf{Backward radiation is not described,} since $\partial_s L$ is dropped. Momentum gained from the recoil of backward or large-angle emission is outside the model by construction.
-\item \textbf{No radiation energy-balance test.} The next check is coherent emission of a short bunch against the far-field radiation integral, as in \code{tests/undulator.sh} of GEM-PIC-RZ, with the analytic plane wave as the undulator. Diagnostics for the energy exchanged with the external laser and absorbed in the sponge are also missing.
+\item \textbf{Energy diagnostics of the external plane wave.} The exchange with the analytic laser (interference term) and the flux into the sponge have no diagnostic yet; the undulator check covers the radiation itself.
+\item \textbf{Periodic box.} The images of the bunch sample the angular spectrum of its radiation at $k_\perp=2\pi m/L_x$: the box must be several times $2\pi/(k\,\Delta\theta)$.
+\item \textbf{Start-up of a rigid bunch:} its transverse field changes by 1--2\,\% in the first step from the co-moving start (partly macroparticle noise); to be understood.
 \item \textbf{Slow particles.} The reduced $\zeta$-equations assume sources with $v\approx c$. In p-polarization $v_z\approx0.87$ for part of every cycle, where the self-field error is $O(1-v_z)$.
-\item \textbf{Periodic images.} The bound field reaches $\gamma\sigma_z\approx0.5$\,mm, so the box size needs a scan.
-\item \textbf{Grid fields frozen over a step,} as in GEM-PIC-RZ; the laser is exact. Halving \code{dz} checks this.
-\item \textbf{Performance.} There is no FFTW, MPI, GPU port, checkpointing or HDF5/openPMD output yet. The production deck needs about 7.8\,GB and days on one core.
+\item \textbf{MPI with plasma} saves memory but not time; the chicane runs on one rank.
 \end{itemize}
 
 \textbf{Open question.} The problem statement gives the laser ``length = 2\,ps''. The deck reads this as the full pulse and uses an intensity FWHM of 0.5\,ps, so the pulse has passed at $z\approx20$\,cm. A 2\,ps FWHM would lengthen the run about fourfold.

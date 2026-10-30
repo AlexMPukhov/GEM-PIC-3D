@@ -21,7 +21,7 @@ with the radiation of the bunch resolved on the grid and acting back on it
 ```
 make                      # build/gempic3d and build/tests (C++17, OpenMP, no external libraries)
 make test                 # 105 checks against analytic references, a few minutes on one core
-make physics              # ion collapse on a large grid: seconds on a GPU, minutes on a 24-core node
+make physics              # ion collapse, undulator radiation energy: 13 s on an RTX 5090, 4.5 min on 24 cores
 make MPI=1 BUILD=build-mpi                 # MPI (mpicxx); test: sh tests/mpi.sh build-mpi/gempic3d
 make CUDA=1 CUDA_ARCH=-arch=sm_120 BUILD=build-gpu  # GPU (nvcc, cuFFT; sm_80 A100, sm_90 H100/GH200); add MPI=1 for both
 make EMU=1 BUILD=build-emu test emu-selftest   # the GPU code paths on the CPU (GPU emulator, see Parallelism)
@@ -459,6 +459,7 @@ diag.light {
 | field ionization in a plane-wave pulse (τ = 30 k0⁻¹, 4096 atoms) against the rate equations with E = −dA/dη: neutral H, fixed atoms, a0 = 0.01; N⁵⁺ → N⁶⁺ → N⁷⁺, mobile, a0 = 2 | 0.514 / 0.517; 0.220 / 0.213, 0.742 / 0.749, 0.0383 / 0.0380 (Monte Carlo scatter ~1 %); CPU and GPU identical |
 | ion collapse (`make physics`, as the check of GEM-PIC-RZ): rigid bunch n_b = 100 n0, σ_r = 2.5 k0⁻¹ (dx = σ_r/10), hydrogen and deuterium, on-axis Z n_i against a radial test-ion model with full blowout and the ion self-field, in the compression phase (3 … 30 n0) | H 1.7 %, D 0.7 % (before, while the blowout forms: 3.6 %, 3.9 %); peak 209 n0 (H), 186 n0 (D) |
 | several bunches: an electron and a positron bunch from the same seed; fields of two frozen bunches (γ = 200 electrons, γ = 50 positrons, offset) against the sum of each alone; flat-top rms length L/√12; transverse offset | 9e-17; 1e-7 (float output); 0.05 %; 0.005 |
+| radiation energy balance (`make physics`, as `tests/undulator.sh` of GEM-PIC-RZ): coherent emission of a 1 fC, γ = 20 bunch (σ_z = 0.785, σ_r = 200 k0⁻¹) in 4 periods of a planar undulator (K = 0.5, λ_r = λ0), W_x − W_y = ½∫(E_x² + B_y² − E_y² − B_x²) after the undulator against the far-field radiation integral (Jackson 14.65) with the form factor of the bunch | −1.9 % at Δζ = λ/31, L_x = 6400 k0⁻¹; converged (second order in Δζ, 1/L_x² in the box) +0.6 % |
 | undulators (one electron, γ = 100, K = 1): planar u_x amplitude K, no drift; slippage over 6 periods against the exact integral of (γ − p_z)/p_z; helical \|u⊥\| = K; natural focusing k_β = K k_u/(√2 γ) | 1e-6; 6e-17; 7e-6; 5e-7; 3e-4 |
 | quadrupole x0 cos(√k L) and y0 cosh(√k L), plasma lens x0 cos(√k L) (γ = 1000, √k L = 1); solenoid with fringes: canonical angular momentum x p_y − y p_x − B r²/2 | 1e-7; 4e-8 (relative to B r²/2) |
 | expressions: operators, functions, units and constants against direct values; a deck value as an expression; wrong unit kind | 1e-16; exact; error |
@@ -490,10 +491,10 @@ At 2.5 FWHM the residual A ~ 10⁻³ a0, amplified by the cross term 2p⊥0·A/h
 
 - **Backward radiation is not described** (∂_s L dropped). A momentum gain from the recoil of backward
   or large-angle emission is outside the model by construction.
-- **No energy-balance test for the radiation yet.** The next check is coherent emission of a short bunch
-  against the far-field radiation integral, as `tests/undulator.sh` in GEM-PIC-RZ, but with the
-  analytic plane wave as the undulator. Energy diagnostics of the exchange with the external laser
-  (interference term) and of the flux into the sponge are also still missing.
+- **Radiation energy balance:** checked for coherent undulator emission (`make physics`, Validation). A periodic
+  box samples the angular spectrum of the radiation at k⊥ = 2π m/L_x (the images of the bunch): the box must be
+  several times 2π/(k Δθ) for an angular width Δθ of the emission. Energy diagnostics of the exchange with the
+  external plane wave (interference term) and of the flux into the sponge are still missing.
 - **Self-fields for slow particles.** The reduced ζ-equations assume sources moving with v ≈ c. In
   p-polarization γ dips to about 2 once per cycle (v_z ≈ 0.87), where the error of the self-field is
   O(1 − v_z) for that part of the orbit.

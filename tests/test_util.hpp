@@ -86,3 +86,4 @@ void test_expr_profiles();
 void test_expr_functions();
 void test_checkpoint();
 void test_chicane();
+void test_undulator_radiation();

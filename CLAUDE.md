@@ -21,7 +21,7 @@ Read this first in every session. It is version-controlled, so it persists betwe
 
 ```
 make && make test                               # CPU, OpenMP; a few minutes on one core
-make physics                                    # ion collapse on a 320^2 x 640 grid: run it on the GPU
+make physics                                    # ion collapse, undulator radiation: run it on the GPU (13 s)
 make MPI=1 BUILD=build-mpi && sh tests/mpi.sh build-mpi/gempic3d
 make EMU=1 BUILD=build-emu test emu-selftest    # GPU code paths on the CPU
 make HDF5=1 BUILD=build-h5 && sh tests/openpmd.sh build-h5/gempic3d   # openPMD, needs h5py + numpy
@@ -65,7 +65,7 @@ Container setup: `apt-get update && apt-get install -y libhdf5-dev pkg-config op
 | `src/deck.*`, `src/grid.*`, `src/comm.*` | deck parser, free-hand step mappings, thin MPI layer |
 | `src/fft.hpp`, `src/fftmany.hpp`, `src/portable.hpp`, `src/emu/` | FFTs, CPU/GPU portability, GPU emulator |
 | `tests/tests.cpp`, `tests/test_*.cpp`, `tests/test_util.hpp` | the checks of `make test` |
-| `tests/physics.cpp` | `make physics`: checks on larger grids (ion collapse), seconds on the GPU |
+| `tests/physics.cpp`, `tests/test_radiation.cpp` | `make physics`: ion collapse, undulator radiation energy balance; seconds on the GPU |
 | `tests/openpmd_check.py`, `tests/mpi.sh`, `tests/gui.sh` | output, MPI and GUI checks |
 | `tools/gempic3d_gui.py`, `tools/compare.py` | browser GUI, laser vs reference run |
 | `docs/output_spec.md` | output groups, common to QUARZ, GEM-PIC-RZ and GEM-PIC-3D |
@@ -98,5 +98,7 @@ Container setup: `apt-get update && apt-get install -y libhdf5-dev pkg-config op
    (`tests/checkpoint.sh`); thin chicane (one rank). Note: a frozen bunch's field changes by ~1-2 % in the first step from the
    co-moving start (E_z ~3 % of E_r near the bunch centre), partly macroparticle noise, partly systematic: to be
    understood (the chicane check therefore compares field changes).
-5. Radiation energy balance check (coherent emission vs far-field integral, plane wave as undulator).
-6. Report update (it describes v1).
+5. (done) Radiation energy balance: coherent undulator emission against the radiation integral (`make physics`,
+   tests/test_radiation.cpp; the scan in /storage2/pukhov/g3d/rad). Possible: the same with the plane wave.
+6. (done, 2026-10-30) Report: section "Version 2" added to docs/GEM-PIC-3D_report.tex; the PDF must be rebuilt
+   where LaTeX works (atto's TeX Live 2018 lacks microtype and the ecrm fonts).

@@ -48,7 +48,7 @@ all: $(BUILD)/gempic3d $(BUILD)/tests
 $(BUILD)/gempic3d: $(SRC) src/main.cpp $(HDR)
 	@mkdir -p $(BUILD)
 	$(CXX) $(CXXFLAGS) -o $@ $(SRC) src/main.cpp $(LDLIBS)
-TESTS = tests/tests.cpp tests/test_fields.cpp tests/test_bunch.cpp tests/test_plasma.cpp tests/test_ions.cpp tests/test_ionization.cpp tests/test_bunches.cpp tests/test_external.cpp tests/test_expr.cpp tests/test_checkpoint.cpp
+TESTS = tests/tests.cpp tests/test_fields.cpp tests/test_bunch.cpp tests/test_plasma.cpp tests/test_ions.cpp tests/test_ionization.cpp tests/test_bunches.cpp tests/test_external.cpp tests/test_expr.cpp tests/test_checkpoint.cpp tests/test_radiation.cpp
 $(BUILD)/tests: $(SRC) $(TESTS) tests/test_util.hpp $(HDR)
 	@mkdir -p $(BUILD)
 	$(CXX) $(CXXFLAGS) -Isrc -o $@ $(SRC) $(TESTS) $(LDLIBS)
