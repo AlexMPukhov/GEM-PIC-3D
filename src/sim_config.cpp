@@ -169,7 +169,34 @@ Config Config::from_deck(const Deck& d) {
             g.helicity = int(d.integer(b, "helicity", 1));
             if (g.helicity != 1 && g.helicity != -1) throw std::runtime_error(b + ".helicity must be 1 or -1");
             c.glasers.push_back(g);
-        } else throw std::runtime_error(b + ".type must be plane_wave or gaussian");
+        } else if (type == "file") {
+            if (!d.flag(b, "enabled", true)) continue;
+            for (const char* k : {"waist", "tau_fwhm", "profile_function", "envelope_function", "z_focus", "cep", "polarization",
+                                  "pol_angle", "helicity", "wavelength", "angle"})
+                if (d.has(b, k)) throw std::runtime_error(b + "." + k + ": not allowed with type = file (the file gives the pulse)");
+            const std::string inj = d.str(b, "inject", "box");
+            if (inj != "box") throw std::runtime_error(b + ".inject: only box (the initial field at z = 0) so far");
+            GridLaser g;
+            g.file_path = d.str(b, "file");
+            const LaserFileData fd = read_laser_file(g.file_path, d.str(b, "file_mesh", ""), d.integer(b, "file_iteration", -1),
+                                                     c.Lu, c.Tu);
+            LaserFileField::Params pp;
+            pp.zeta_center = L(b, "zeta_center");
+            pp.t_center = d.has(b, "t_center") ? d.num(b, "t_center", Kind::Time) / c.Tu : laser_file_centroid(fd);
+            pp.file_z = d.has(b, "file_z") ? d.num(b, "file_z", Kind::Length) / c.Lu : 0.0;
+            pp.padding = int(d.integer(b, "padding", 2));
+            pp.padding_xy = int(d.integer(b, "padding_xy", 1));
+            if (pp.padding < 1 || pp.padding_xy < 1) throw std::runtime_error(b + ": padding and padding_xy must be >= 1");
+            if (d.has(b, "a0")) pp.scale = d.num(b, "a0", Kind::None) * fd.omegaL / fd.peak;
+            g.a0 = pp.scale * fd.peak / fd.omegaL; g.kL = fd.omegaL; g.zeta_c = pp.zeta_center;
+            g.waist = 0; g.tau = 0;
+            g.file = std::make_shared<LaserFileField>(fd, pp);
+            g.file->info.insert(g.file->info.begin(), g.file_path + " (" +
+                (fd.cartesian ? "cartesian, " + std::to_string(fd.nt) + " x " + std::to_string(fd.ny) + " x " + std::to_string(fd.nx)
+                              : "thetaMode, " + std::to_string((fd.ncomp - 1) / 2) + " modes, " + std::to_string(fd.nt) + " x " + std::to_string(fd.nr)) +
+                ", " + fd.field + (fd.software.empty() ? "" : ", from " + fd.software) + ")");
+            c.glasers.push_back(g);
+        } else throw std::runtime_error(b + ".type must be plane_wave, gaussian or file");
     }
     if (d.has_block("plasma")) {
         c.plasma_on = true;
@@ -336,6 +363,15 @@ void Config::summary(FILE* f, int ranks) const {
     summary_external(f);
     std::fprintf(f, "  parallel: %s, %d MPI rank(s), transverse window lag %d steps\n", GEMPIC_GPU ? "CUDA" : "OpenMP", ranks, window_lag);
     for (size_t k = 0; k < glasers.size(); ++k)
+        if (glasers[k].file) {
+            const auto& F = *glasers[k].file;
+            std::fprintf(f, "  grid laser %zu: file, a0 = %.4g (peak |env| / omega_L), lambda = %.4g um, polarization (%.3g%+.3gi, %.3g%+.3gi), "
+                         "file time %.4g fs at zeta = %.4g um\n", k + 1, glasers[k].a0, lambda0 / F.omegaL * 1e6, F.px.real(), F.px.imag(),
+                         F.py.real(), F.py.imag(), F.tau(glasers[k].zeta_c) * Tu * 1e15, glasers[k].zeta_c * um);
+            for (const auto& l : F.info) std::fprintf(f, "    %s\n", l.c_str());
+            if (F.edge > 1e-3)
+                std::fprintf(f, "    WARNING: |env| at the edge of the envelope grid is %.3g of the peak (increase padding / padding_xy or the file's box)\n", F.edge);
+        } else
         std::fprintf(f, "  grid laser %zu: a0 = %g, lambda = %.4g um, waist = %.4g um, tau_FWHM = %.4g fs, centre at zeta = %.4g um, focus at z = %.4g um, %s\n",
                      k + 1, glasers[k].a0, lambda0 / glasers[k].kL * 1e6, glasers[k].waist * um, glasers[k].tau * Tu * 1e15,
                      glasers[k].zeta_c * um, glasers[k].z_focus * um, glasers[k].circular ? "circular" : "linear");

@@ -19,6 +19,7 @@
 #include "grid.hpp"
 #include "ionization.hpp"
 #include "external.hpp"
+#include "laser_file.hpp"
 #include "portable.hpp"
 
 // an ion species on the device: mass [m_e], mobile, ionizing, highest charge state, offset of its levels in the ADK
@@ -87,6 +88,8 @@ struct Config {
         double a0 = 1, kL = 1, waist = 10, tau = 10, zeta_c = 0, z_focus = 0, cep = 0, pol_angle = 0;
         bool circular = false; int helicity = 1;
         Expr profile, envelope;          // profile_function(r) at z = 0 (replaces waist, z_focus), envelope_function(zeta)
+        std::shared_ptr<LaserFileField> file;   // type = file: LASY envelope, propagated to z = 0 (laser_file.hpp)
+        std::string file_path;
     };
     std::vector<GridLaser> glasers;
     // plasma (code units): n = n0 f(z) g(r) for r < r_max; f: table (z_points, z_values; constant beyond its

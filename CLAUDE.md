@@ -57,6 +57,7 @@ Container setup: `apt-get update && apt-get install -y libhdf5-dev pkg-config op
 | `src/sim_ions.cpp` | ion blocks of the deck, ADK tables on the device, `ionization.txt` |
 | `src/external.hpp`, `src/sim_external.cpp` | undulators and transport elements: fields, deck blocks, push sub-steps |
 | `src/expr.*` | expressions of the deck (from RZ); `Deck::expr`, `constants`, values as expressions in `Deck::num` |
+| `src/laser_file.*`, `src/h5read.hpp` | LASY envelope files (from RZ): reader, writer (tests), exact propagation to z = 0; HDF5 read helper |
 | `src/sim_checkpoint.cpp` | checkpoints per rank, restart, `latest` |
 | `src/sim_bunches.cpp` | bunch blocks (several bunches, positrons, flat-top), loading, co-moving field per bunch |
 | `src/ionization.*`, `src/atomic_data.*` | ADK rates (code units, device), counter-based RNG; NIST energies and masses (from RZ) |
@@ -83,6 +84,7 @@ Container setup: `apt-get update && apt-get install -y libhdf5-dev pkg-config op
   `plasma.free_electrons`. Checks: immobile limit, neutral pairs, ADK = Landau, H and N against rate equations
   (`make test`); ion collapse against a radial test-ion model (`make physics`, converged only at dx = sigma/10 and
   n_b = 100 n0; with n_b = 20 n0 plasma electrons return to the compressed ions and the model fails).
+- LASY laser files (`laser.type = file`, HDF5 build): README section Laser files; `inject = box` only.
 - Output groups as in QUARZ (`output`, `diag.<name>`), native and openPMD. GEM-PIC-RZ is to follow
   `docs/output_spec.md`; QUARZ is the reference.
 - 3D beam wake: the earlier ~9 % deviation from the continuum theory is the TSC shape of the plasma
@@ -102,7 +104,12 @@ Container setup: `apt-get update && apt-get install -y libhdf5-dev pkg-config op
    tests/test_radiation.cpp; the scan in /storage2/pukhov/g3d/rad). Possible: the same with the plane wave.
 6. (done, 2026-10-30) Report: section "Version 2" added to docs/GEM-PIC-3D_report.tex; the PDF must be rebuilt
    where LaTeX works (atto's TeX Live 2018 lacks microtype and the ecrm fonts).
-7. Still missing against GEM-PIC-RZ (its docs/input_deck.md): lasers from LASY/openPMD envelope files and LASY
+7. (done, 2026-11-10, branch `lasy`) LASY laser files: `laser { type = file }` (src/laser_file.*, reader and
+   conventions from GEM-PIC-RZ, h5read.hpp copied from there), cartesian and thetaMode, exact vacuum propagation
+   from `file_z` to z = 0 by a 3D FFT (t, y, x), injected as R = 2 E_perp like the Gaussian grid laser; check 28 of
+   `make test` in the HDF5 build (README Validation). Every rank propagates the whole file at the start (memory
+   nt x ny x nx x padding x 16 B); restrict to the rank's time range if files get large.
+   Still missing against GEM-PIC-RZ (its docs/input_deck.md): `inject = boundary` (through the sponge) and LASY
    output; the flying focus; bunches from files (openPMD import); FEL diagnostics (fel.txt, fel_power,
    fel_harmonics); bunch z_start, quiet start, axis_refine; ion `profile = own` (dopants); plasma radial profile
    options; numerics.beam_field = mean (undulators with intense beams); a free-hand z grid; the chicane with MPI.

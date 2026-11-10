@@ -39,7 +39,14 @@ expressions).
 | numerics | `self_fields` | true | false: test particles in the laser only |
 | | `zeta_filter`, `k_filter` | true, true | current filters |
 | | `push_phase` | 0.05 rad | laser phase per RK4 sub-step |
-| | `type` | plane_wave | `plane_wave` (analytic, above) or `gaussian` (on the grid): `a0`, `wavelength`, `waist` *or* `profile_function(r)`, `tau_fwhm` *or* `envelope_function(zeta)`, `zeta_center`, `z_focus` (0), `cep`, `polarization` (linear, circular), `pol_angle`, `helicity`, `enabled` |
+| laser (`type`) | `type` | plane_wave | `plane_wave` (analytic, above), `gaussian` (on the grid): `a0`, `wavelength`, `waist` *or* `profile_function(r)`, `tau_fwhm` *or* `envelope_function(zeta)`, `zeta_center`, `z_focus` (0), `cep`, `polarization` (linear, circular), `pol_angle`, `helicity`, `enabled`; or `file` (on the grid, below) |
+| laser (`type = file`) | `file` | — | LASY / openPMD envelope file (`laserEnvelope`, cartesian (t, y, x) or thetaMode (t, r)); HDF5 build (`make HDF5=1`). The pulse is given by the file: `waist`, `tau_fwhm`, `polarization`, … are not allowed (README, Laser files) |
+| | `zeta_center` | — | window position of the file time `t_center` (slice ζ holds the file time τ = t_center + zeta_center − ζ) |
+| | `t_center` | intensity centroid | time of the file put at `zeta_center` (the file's time base) |
+| | `file_z` | 0 | plane of the file in the coordinates of the run (z = 0: its start); ≠ 0: exact vacuum propagation of every (ω, k_x, k_y) to z = 0 |
+| | `a0` | from the file | rescales the field so that the peak of \|env\| is a0 ω_L |
+| | `padding`, `padding_xy` | 2, 1 | FFT length of the propagation in t and transversally, in units of the file's axes (`file_z` ≠ 0 only; the summary warns when the envelope reaches the edge) |
+| | `file_mesh`, `file_iteration`, `inject`, `enabled` | laserEnvelope, last, box, true | mesh and iteration of the file; `inject = box` (the field at the start; `boundary` not yet) |
 | plasma | `density` | — | cm^-3 or n_c |
 | | `free_electrons` | true | false: a neutral gas, all electrons come from field ionization (ion blocks with `charge_state = 0`) |
 | | `z_points`, `z_values` | — | longitudinal profile (relative), linear between the points |

@@ -168,7 +168,8 @@ Stage 1 of the physics of GEM-PIC-RZ, with the same algorithm (`src/sim_plasma.c
   commute with the discrete divergence, so the smoothed current conserves the smoothed charge.
 - **Lasers on the grid** (`laser` blocks with `type = gaussian`; more blocks: `laser`, `laser2`, …): paraxial
   Gaussian pulses, R = 2E⊥ with the complex beam parameter (focus at `z_focus`), `a0`, `waist`, `tau_fwhm`
-  (intensity), `zeta_center`, `cep`, linear (`pol_angle`) or circular (`helicity`) polarization. The analytic
+  (intensity), `zeta_center`, `cep`, linear (`pol_angle`) or circular (`helicity`) polarization; or any pulse
+  from a LASY file (`type = file`, section Laser files). The analytic
   plane wave (`type = plane_wave`, the default) stays as before; it is not changed by the plasma.
 - **Net current:** with plasma the k⊥ = 0 current is kept (a 1D plasma wave, not a net current in a periodic box),
   and the sponge uses the bound field of the beam list only.
@@ -201,6 +202,34 @@ gathered fields of the bunch push and of the streaming particles; the field solv
   field of the beam moves with it: the co-moving fields R of the old and the new positions are subtracted and added
   (vacuum at the chicane), E_z, B_z and L follow from R as at the start; the radiation and the part of the field that
   is not co-moving stay. One rank only, as in GEM-PIC-RZ.
+
+## Laser files (LASY)
+
+`laser { type = file; file = pulse.h5; zeta_center = 100 um }` puts a pulse from a LASY / openPMD envelope file
+(https://github.com/LASY-org/lasy, extension LaserEnvelope) on the grid, as `laser.file` of GEM-PIC-RZ
+(`src/laser_file.*`, conventions shared with it). The file holds the complex envelope of E⊥ at a plane z = z_f as a
+function of the lab time t, E_{x,y} = Re[p_{x,y} env e^{−iω_L t}] with the polarization (p_x, p_y), in `cartesian`
+(axes t, y, x) or `thetaMode` geometry (axes t, r; components m = 0, cos mθ, sin mθ, summed on the Cartesian
+points), as `electric_field` (V/m) or `normalized_vector_potential` (E = iω_L a − ∂_t a). Any spatio-temporal
+structure is kept (chirps, pulse-front tilt, axiparabola or other structured light prepared in LASY).
+
+Placement (GT2): the start level s = 0 is the plane z = 0 and its slice ζ is the time t = −ζ, so the file is a level
+of the code; its time `t_center` (default: the intensity centroid) is put at `zeta_center`, i.e. the slice ζ holds
+the file time τ = t_center + zeta_center − ζ, with the carrier e^{−iω_L τ} (the CEP of the file). With `file_z` = 0
+the envelope is interpolated (trilinear in x, y, τ) to the points of the grid (and the half-nodes of the free-hand
+y). With `file_z` ≠ 0 the field at z = 0 is the exact vacuum solution: the envelope is transformed in (t, y, x)
+(FFT lengths `padding` × the file's time axis and `padding_xy` × its transverse axes), every plane wave
+(ω = ω_L − Ω, k_x, k_y) gets the phase e^{i(k_z − ω)(0 − z_f)} at fixed retarded time, k_z = √(ω² − k⊥²), and the
+evanescent part (k⊥ > ω) is dropped; no paraxial or envelope approximation. E.g. `file_z = 3 mm` starts a pulse
+given at its focus 3 mm before the focus. The forward field is R = 2E⊥, L = 0 (as the Gaussian grid laser); the
+grid then propagates it with the GEM scheme. Every rank fills only its own slices (MPI); a restart takes R from
+the checkpoint.
+
+The summary lists the file, its grid and field type, ω_L, the polarization, the placement, the energy fraction
+dropped as evanescent, and warns when the envelope reaches the edge of the propagation grid (wrap-around: increase
+`padding` / `padding_xy` or the file's box). The periodic box of the code must hold the pulse; the envelope is
+zero outside the file's box. Not yet: feeding the pulse through the sponge at every step (`inject = boundary` of
+GEM-PIC-RZ, needed for the flying focus) and LASY output.
 
 ## Checkpoints and restart
 
@@ -468,6 +497,7 @@ diag.light {
 | chicane (frozen γ = 1000 bunch): change of E⊥, B⊥ by a delay of 20 k0⁻¹ against the change of the co-moving start field; R56 = 50 k0⁻¹ with 1 % spread: shift of every particle | 8e-8 (float output); 7e-15 |
 | checkpoint (plasma ramp, laser wake, mobile H⁺, ionizing N⁵⁺, bunch, moving window): 2 steps, checkpoint, restart, 2 steps against 4 steps; `tests/checkpoint.sh`: `--restart latest` from step 4 of 12 (1 and 2 ranks), wall-time stop | fields 5e-10 (thread sums), beam list and window exact; `diag.txt`, `ionization.txt` identical; exit code 3 |
 | GUI (`tests/gui.sh`): frames, cuts, 2 ranks = 1 rank, plasma frames | pass |
+| LASY files (`type = file`, HDF5 build): cartesian file of the built-in Gaussian (a0 = 1, w = 12, τ = 25, `pol_angle` 0.3, `cep` 0.4) at its plane = built-in (start fields); `normalized_vector_potential` = `electric_field` of the same pulse; `a0` rescaling; thetaMode (C_0) = built-in (radial interpolation, dr = dx/4); thetaMode with m = 1 (cos, sin) = cartesian file of the same field; file at the focus with `file_z` = 3 z_R (k w = 6): envelope at z = 0 against an independent exact reference (Hankel transform per frequency); 20 steps in vacuum = built-in | 1e-12; 2e-5; 0; 5e-4; 6e-4; 3e-5 (the paraxial one-frequency Gaussian differs by 5 %); 6e-12 |
 | output groups and openPMD (`tests/openpmd.sh`): periods and selections of two groups, openPMD attributes and input deck, particles = native beam file, fields = native field file and axis file on a uniform grid | pass; 1.5e-7; exact; 1.5e-11 |
 | all of the above on a real GPU (RTX 5090, `make CUDA=1`); `tests/emu_wake.cpp` GPU against CPU; `tests/mpi.sh` with CUDA + MPI | pass, equal to the CPU build to rounding; bit for bit; identical |
 | all of the above except the 3D beam wake in the GPU emulator (`make EMU=1 test`); the 3D beam wake there on a reduced grid (`tests/emu_wake.cpp`: 32 × 32 modes, Δζ = 1, 10 steps, Fourier and free-hand y) against the CPU build; `tests/mpi.sh build-emu-mpi/gempic3d`; FFTW build | pass; E_z on the axis identical bit for bit; pass, pass (both before the output groups; to be rerun) |

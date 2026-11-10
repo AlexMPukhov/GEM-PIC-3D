@@ -36,6 +36,7 @@ int main(int argc, char** argv) {
     test_expr_profiles();
     test_expr_functions();
     test_checkpoint();
+    test_lasy();
     std::printf("%s: %d failure(s)\n", failures ? "FAILED" : "ALL PASSED", failures);
     comm.finalize();
     return failures ? 1 : 0;

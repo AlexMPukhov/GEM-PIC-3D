@@ -316,7 +316,8 @@ void Simulation::solve_fields(double D) {
     device_sync();
 }
 
-// a Gaussian laser pulse on the grid: R = 2 E_perp of a paraxial beam (complex beam parameter), focus at z_focus
+// a Gaussian laser pulse on the grid: R = 2 E_perp of a paraxial beam (complex beam parameter), focus at z_focus;
+// type = file: R = 2 E_perp of the envelope file, propagated exactly to z = 0 (laser_file.cpp)
 void Simulation::add_grid_lasers() {
     if (cfg.glasers.empty()) return;
     const int nx = cfg.nx, ny = cfg.ny;
@@ -330,10 +331,12 @@ void Simulation::add_grid_lasers() {
         const std::complex<double> rot(std::cos(Lz.pol_angle), std::sin(Lz.pol_angle));
         for (int n = a; n < b; ++n) {
             const double d = cfg.zeta[n] - Lz.zeta_c;
-            const double env = Lz.envelope.empty() ? std::exp(-2 * std::log(2.0) * d * d / (Lz.tau * Lz.tau)) : Lz.envelope({cfg.zeta[n]});
+            const double env = Lz.file ? (Lz.file->covers(cfg.zeta[n]) ? 1.0 : 0.0)
+                             : Lz.envelope.empty() ? std::exp(-2 * std::log(2.0) * d * d / (Lz.tau * Lz.tau)) : Lz.envelope({cfg.zeta[n]});
             if (std::fabs(env) < 1e-12) continue;
             const std::complex<double> car = std::exp(std::complex<double>(0, Lz.kL * d + Lz.cep));
             auto field = [&](double xp, double yp, double& ex, double& ey) {
+                if (Lz.file) { Lz.file->field(xp, yp, cfg.zeta[n], ex, ey); return; }   // type = file (laser_file.hpp)
                 const std::complex<double> E = Lz.profile.empty()
                     ? amp * env * std::exp(-(xp * xp + yp * yp) / (Lz.waist * Lz.waist) / qb) / qb * car
                     : amp * env * Lz.profile({std::sqrt(xp * xp + yp * yp)}) * car;
