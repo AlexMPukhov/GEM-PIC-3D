@@ -21,6 +21,7 @@ Read this first in every session. It is version-controlled, so it persists betwe
 
 ```
 make && make test                               # CPU, OpenMP; a few minutes on one core
+sh tests/beam_import.sh build-h5/gempic3d       # bunches from files, bunches.txt, slices (HDF5 build, h5py)
 make physics                                    # ion collapse, undulator radiation: run it on the GPU (13 s)
 make MPI=1 BUILD=build-mpi && sh tests/mpi.sh build-mpi/gempic3d
 make EMU=1 BUILD=build-emu test emu-selftest    # GPU code paths on the CPU
@@ -114,3 +115,52 @@ Container setup: `apt-get update && apt-get install -y libhdf5-dev pkg-config op
    fel_harmonics); bunch z_start, quiet start, axis_refine; ion `profile = own` (dopants); plasma radial profile
    options; numerics.beam_field = mean (undulators with intense beams); a free-hand z grid; the chicane with MPI.
    Also: understand the 1-2 % first-step change of a rigid bunch's field from the co-moving start.
+
+## Development towards the state of GEM-PIC-RZ (from 2026-11-15)
+
+Alexander (2026-11-15): develop GEM-PIC-3D to the state of GEM-PIC-RZ; follow the choices made there (model,
+numerics, deck syntax, output conventions), decide the rest and record each decision here with its reason; report at
+milestones with numbers. Features on a branch with a pull request into `main`. First application: beam-driven wakes
+in plasma channels of any cross-section (`density_function`), metres of propagation.
+
+Rules taken over from the GEM-PIC-RZ work: no physics may be dropped to make a problem go away; every fix is tested
+against an independent reference; compare with the theory of the DISCRETE scheme where the discretization matters;
+never analyse the first steps of a plasma wake (start-up transient); keep MPI = 1 rank; compile-check the CUDA build
+and keep `make EMU=1` green.
+
+Branch `rz-benchmarks` (2026-11-15):
+- **Start field** (`numerics.start_relax`, default on; `Simulation::relax_start_field`): the v = c part of the
+  co-moving start field is replaced by the steady state of the discrete scheme (three backward-Euler marches with a
+  step of 100 dz). This was the open "1-2 % change of a rigid bunch's field in the first step": the continuum
+  co-moving field is not the scheme's steady state, and the trapezoidal rule keeps the mismatch of the stiff modes as
+  an odd-even mode in s (1.5 % of E_perp; +-10 ... 35 % of the wake's E_z at the bunch in a plasma channel); now
+  <= 1.4e-5 per step without alternation (relaxation step 100 dz: 1e4 dz gave 6e-8 but amplified rounding, 2 MPI
+  ranks then differed from 1 in the last printed digit on the free-hand y). The
+  discrete steady state itself is clean (E_z, E_x - B_y < 1e-8 E_perp also for sigma_z = 2 h): no static j_z
+  mismatch as in GEM-PIC-RZ. The chicane uses the same relaxed field. Decision: fix the start, change no equation.
+- **Start field without the k_perp = 0 current of the bunch**, also with plasma (it was kept there and started the
+  bunch in the uniform E_z of its sheet charge in the periodic box: 0.023 MeV lost in the first step of the benchmark).
+- **Periodic images:** decision: the box stays periodic, the error is stated by a box-size scan (benchmarks/rz:
+  0.7 % in the energy loss between 3.2 and 6.4 mm with a wall of 4 c/omega_p). `numerics.box_mean = remove` exists
+  for checks; it is worse for channels (their E_z has a physical box average) and stays off.
+- **Bunches from files** (`bunch.file`, src/beam_import.* from RZ, src/sim_bunch_file.cpp), **bunches.txt** and
+  **slices_NNNNNN.txt** (src/sim_bunch_diag.cpp; centred second moments in two passes, as RZ's energy spread).
+  Decision: bunches.txt follows the period of diag.txt (`output.every`), not every step as in RZ: the beam list
+  is downloaded from the GPU for it.
+- **Deck:** several assignments on a line separated by `;` (the README examples used it, the parser did not).
+- **Summary warning** when dz * dzeta * omega_p^2 > 8 (the plasma march fails at 25; the long-wake check runs 6.25).
+- **Checks:** 29 static bunch, 30 beam in a drift (E_r / gamma^2), 31 long wake with large steps (tests/test_lessons.cpp;
+  `make build/lessons` builds them alone), tests/beam_import.sh, benchmarks/rz (GEM-PIC-RZ, offset bunch in a round
+  hollow channel: energy loss +1.7 %, E_z 5 %, dipole kick 0.6 %).
+- atto: clone and builds in /storage2/pukhov/g3d-mature (login node: compile; nodes: `sbatch -p atto`, binaries
+  linked with -static-libstdc++; HDF5 in /storage2/pukhov/gpu/opt/hdf5; python 3.14 with PYTHONPATH
+  /storage2/pukhov/g3d/pylib). GEM-PIC-RZ binary for the atto nodes: /storage2/pukhov/gempic-combo/build_ivb.
+
+Next (order agreed with the lessons of GEM-PIC-RZ):
+1. non-axisymmetric channel example (plasma on one side of the beam) over ~1 m with an imported bunch and many
+   quadrupoles; cost and resolution (uniform x grid: dx ~ 0.6 sigma_r gave 1-2 %);
+2. `beam_field = mean` for undulators (planar step instability), undulator kick/current timing proven or fixed,
+   edge-averaged transport elements + quad_edges check, GENESIS benchmark;
+3. output: volume and peak-memory report, openPMD position-snapshot attributes, SI density check;
+4. real-GPU rerun of all checks; then the remaining list above (boundary LASY injection, flying focus, FEL
+   diagnostics, z_start, quiet start, dopant profiles, free-hand z, MPI chicane).

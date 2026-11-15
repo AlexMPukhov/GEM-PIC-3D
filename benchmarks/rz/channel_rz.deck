@@ -1,0 +1,29 @@
+# GEM-PIC-RZ twin of channel_3d.deck (modes m = 0, 1; radial step 5 um, converged: see README.md)
+grid {
+  lambda0       = 10 um
+  m_max         = 1
+  radial_grid   = uniform
+  dr            = 5 um
+  r_max         = 1.6 mm
+  dzeta         = 10 um
+  window_length = 3 mm
+  dz            = 2 mm
+  z_end         = 20 mm
+}
+plasma {
+  density = 1e15 cm^-3
+  r_max   = 1.2 mm
+  density_function = "min(max((r - 0.475 mm) / (50 um), 0), 1)"
+}
+bunch {
+  charge  = 2 nC
+  energy  = 1 GeV
+  sigma_x = 20 um
+  sigma_z = 200 um
+  emittance_x = 1 um
+  x0      = 20 um
+  zeta_center = 2.3 mm
+  macroparticles = 400000
+}
+numerics { beam_dz_max = 0.2 mm; backend = openmp }
+output { dir = chan_rz; every = 5; map_stride = 1 }

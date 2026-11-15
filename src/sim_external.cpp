@@ -118,8 +118,11 @@ void Simulation::apply_chicanes(double s0, double s1) {
         std::vector<std::vector<cpx>> keep;
         for (Buf<cpx>* p : {&Rx, &Ry}) keep.push_back(p->host());
         auto comoving = [&](std::vector<cpx>& rx, std::vector<cpx>& ry) {
+            starting_ = true;                              // vacuum at the chicane: no k_perp = 0 current
             if (cfg.nbunch() > 1) comoving_fields_per_bunch();
             else { currents(); comoving_field(); }
+            if (cfg.start_relax) relax_start_field();      // the same field as at the start
+            starting_ = false;
             rx = Rx.host(); ry = Ry.host();
         };
         std::vector<cpx> ox, oy, nx, ny;

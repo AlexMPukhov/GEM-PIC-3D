@@ -1,0 +1,44 @@
+# GEM-PIC-3D against GEM-PIC-RZ: an electron bunch, offset by one sigma, in a round hollow plasma channel given by
+# plasma.density_function (generic numbers). The same case for GEM-PIC-RZ: channel_rz.deck (modes m = 0, 1).
+#   plasma: 1e15 cm^-3 (c/omega_p = 168 um), bore radius 0.5 mm with a 50 um linear edge, wall out to r = 1.2 mm
+#   bunch:  1 GeV, 2 nC, sigma_r = 20 um, sigma_z = 200 um, offset x0 = 20 um
+# 10 steps of 2 mm; README.md in this directory has the comparison and the box and resolution scans.
+grid {
+  lambda0       = 10 um
+  nx            = 256
+  ny            = 256
+  Lx            = 3.2 mm
+  Ly            = 3.2 mm
+  nzeta         = 301
+  window_length = 3 mm
+  dz            = 2 mm
+  dz_push       = 0.2 mm
+  z_end         = 20 mm
+  move_x        = false
+  move_y        = false
+}
+plasma {
+  density = 1e15 cm^-3
+  r_max   = 1.2 mm
+  density_function = "min(max((r - 0.475 mm) / (50 um), 0), 1)"
+  ppc_x   = 2
+}
+bunch {
+  charge  = 2 nC
+  energy  = 1 GeV
+  sigma_x = 20 um
+  sigma_z = 200 um
+  emittance_x = 1 um
+  x0      = 20 um
+  zeta_center = 2.3 mm
+  macroparticles = 400000
+}
+output {
+  dir = chan_3d
+  every = 1
+  axis = true
+  fields = ez ex ne
+  beam_every = 10
+  particles = false
+  slice_length = 100 um
+}
