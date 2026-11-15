@@ -149,7 +149,8 @@ Branch `rz-benchmarks` (2026-11-15):
   is downloaded from the GPU for it.
 - **Deck:** several assignments on a line separated by `;` (the README examples used it, the parser did not).
 - **Summary warning** when dz * dzeta * omega_p^2 > 8 (the plasma march fails at 25; the long-wake check runs 6.25).
-- **Checks:** 29 static bunch, 30 beam in a drift (E_r / gamma^2), 31 long wake with large steps (tests/test_lessons.cpp;
+- **Checks:** 29 static bunch, 30 beam in a drift (E_r / gamma^2), 31 long wake with large steps, 32 plasma on one
+  side of the bunch = its mirror image (tests/test_lessons.cpp;
   `make build/lessons` builds them alone), tests/beam_import.sh, benchmarks/rz (GEM-PIC-RZ, offset bunch in a round
   hollow channel: energy loss +1.7 %, E_z 5 %, dipole kick 0.6 %).
 - atto: clone and builds in /storage2/pukhov/g3d-mature (login node: compile; nodes: `sbatch -p atto`, binaries
@@ -157,7 +158,8 @@ Branch `rz-benchmarks` (2026-11-15):
   /storage2/pukhov/g3d/pylib). GEM-PIC-RZ binary for the atto nodes: /storage2/pukhov/gempic-combo/build_ivb.
 
 Next (order agreed with the lessons of GEM-PIC-RZ):
-1. non-axisymmetric channel example (plasma on one side of the beam) over ~1 m with an imported bunch and many
+1. (one-sided plasma over 1 m done 2026-11-15: examples/one_sided_plasma.deck, README; open side: images 3-4 % at
+   a 3.2 mm box) the same with an imported bunch and many
    quadrupoles; cost and resolution (uniform x grid: dx ~ 0.6 sigma_r gave 1-2 %);
 2. `beam_field = mean` for undulators (planar step instability), undulator kick/current timing proven or fixed,
    edge-averaged transport elements + quad_edges check, GENESIS benchmark;

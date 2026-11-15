@@ -20,7 +20,7 @@ with the radiation of the bunch resolved on the grid and acting back on it
 
 ```
 make                      # build/gempic3d and build/tests (C++17, OpenMP, no external libraries)
-make test                 # 118 checks against analytic references, a few minutes on one core
+make test                 # 121 checks against analytic references, a few minutes on one core
 make physics              # ion collapse, undulator radiation energy: 13 s on an RTX 5090, 4.5 min on 24 cores
 make MPI=1 BUILD=build-mpi                 # MPI (mpicxx); test: sh tests/mpi.sh build-mpi/gempic3d
 make CUDA=1 CUDA_ARCH=-arch=sm_120 BUILD=build-gpu  # GPU (nvcc, cuFFT; sm_80 A100, sm_90 H100/GH200); add MPI=1 for both
@@ -203,6 +203,14 @@ ramps of a few cells (`"min(max((r - 0.475 mm) / (50 um), 0), 1)"`).
 - **Check against GEM-PIC-RZ** ([`benchmarks/rz/`](benchmarks/rz/README.md)): a 1 GeV, 2 nC bunch offset by one σ in
   a round hollow channel at 10¹⁵ cm⁻³, 20 mm; GEM-PIC-RZ with the modes m = 0, 1. Energy loss +1.7 %, E_z at the
   bunch and in the first wake period within 5 %, the dipole kick along the bunch within 0.6 %.
+- **Plasma on one side of the beam** (`examples/one_sided_plasma.deck`; check 32): a 1 GeV, 2 nC bunch (σ = 20 µm)
+  passes a round plasma column of 10¹⁵ cm⁻³ at 200 µm from its surface, 1 m in 500 steps (35 min on 24 cores). The
+  bunch is pulled to the plasma (the ions left behind by the expelled surface electrons attract it), crosses the
+  surface at z ≈ 0.15 m and then drives a half-bubble 70 µm inside, losing 250 MeV/m; ⟨y⟩ stays below 0.1 µm. A test
+  of non-axisymmetric plasma, not an accelerator layout. Checks: the column mirrored to the other side gives the
+  mirrored deflection to 1 × 10⁻⁴ (z = 40 mm); box 4.8 mm instead of 3.2 mm: deflection +3.6 %, energy loss −3.2 %
+  (the periodic images on the open side); dx = 6.25 µm instead of 12.5 µm at z = 0.2 m: ⟨x⟩ 0.3 %, σ_x 0.5 %,
+  ε_nx 0.1 %, energy loss 2.1 %, but σ_y 5 % and ε_ny 14 % (σ_y falls to 8 µm, below the coarse cell).
 - **Periodic images** (decision 2026-11-15: the box stays periodic; the error is measured by a box-size scan).
   A plasma wall a few c/ω_p thick screens the images: in the benchmark the box size (3.2 → 6.4 mm, wall 4 c/ω_p)
   changes the energy loss by 0.7 %. Where vacuum reaches the edge of the box (open sides), the images act at the

@@ -161,3 +161,45 @@ void test_long_wake(bool extrap, int passes) {
     close(tag + "amplitude at step 8 = step 6", amp[8], amp[6], 0.03);
     info(tag + "amplitude at step 1 / theory", amp[1] / th, "the start-up transient: never read the first steps");
 }
+
+// 32. Plasma on one side of the beam (plasma.density_function of x and y: no axis of symmetry). A bunch
+//     (n_b = 0.5 n0, k_p sigma_r = 0.5, gamma = 1000) passes a round plasma column at 1.25 c/omega_p from its
+//     surface, 6 steps of 10 c/omega_p. The column on the other side is the mirror image x -> -x of the same
+//     problem: the mean transverse momentum gained by the bunch must be equal and opposite (the grid, the plasma
+//     loading and the solver have no preferred side; the random bunch is the same in both runs and is not
+//     mirrored, which limits the agreement), it must point to the plasma (the bunch expels the plasma electrons
+//     of the surface, the ions left behind attract it), and <p_y> must stay zero.
+struct SideKick { double px, py; };
+static SideKick one_sided(double side) {
+    Config c = Config::base_units(10e-6);
+    const double kp = 0.1, sig = 0.5 / kp, sz = 1.2 / kp, h = 0.15 / kp, Lw = 12 / kp, L = 19.2 / kp;
+    c.nx = 64; c.Lx = L; c.y_uniform(64, L);
+    c.zeta_uniform(int(Lw / h) + 1, Lw);
+    c.sponge = c.sponge_y = 0; c.move_x = c.move_y = false;
+    c.plasma_on = true; c.n0 = kp * kp; c.ppc_x = 1; c.ppc_y = 1;
+    Deck d;                                              // only for the units of the expression (code units here)
+    d.set_code_units(c.Lu, c.Tu, c.nc);
+    d.read_constants();
+    c.density_fn = Expr(strf("min(max((35 - sqrt((x - (%g))^2 + y^2)) / 3 + 0.5, 0), 1)", side * 47.5), {"x", "y", "z", "r"}, {},
+                        d.unit_fn());
+    const double Ne = 0.5 * c.n0 * std::pow(2 * M_PI, 1.5) * sig * sig * sz;
+    c.gamma = 1000; c.sigx = c.sigy = sig; c.sigz = sz; c.nmacro = 200000; c.zeta_center = Lw - 4 * sz;
+    c.charge = Ne * c.nc * std::pow(c.Lu, 3) * 1.602176634e-19;
+    c.dz = 10 / kp; c.dz_push = 1 / kp;
+    Simulation sim(c, comm);
+    sim.init();
+    for (int k = 0; k < 6; ++k) sim.step();
+    SideKick r{0, 0};
+    double w = 0;
+    for (const auto& p : sim.host_particles())
+        if (p.alive == 1) { r.px += p.w * p.px; r.py += p.w * p.py; w += p.w; }
+    r.px /= w; r.py /= w;
+    return r;
+}
+void test_one_sided() {
+    const SideKick a = one_sided(1), b = one_sided(-1);
+    const std::string tag = "plasma on one side of the bunch (density_function(x, y)): ";
+    check(a.px > 0 && b.px < 0, tag + "the bunch is pulled to the plasma, <p_x>", a.px, 0, 0);
+    close(tag + "mirrored plasma gives the mirrored kick, -<p_x>", -b.px, a.px, 0.02);
+    check(std::fabs(a.py) < 0.01 * std::fabs(a.px), tag + "<p_y> / <p_x> stays zero", a.py / a.px, 0, 0.01);
+}

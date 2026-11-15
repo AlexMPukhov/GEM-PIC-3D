@@ -41,6 +41,7 @@ int main(int argc, char** argv) {
     for (double dz : {50.0, 500.0}) test_beam_drift(dz);
     test_long_wake(true, 2);
     test_long_wake(false, 2);
+    test_one_sided();
     std::printf("%s: %d failure(s)\n", failures ? "FAILED" : "ALL PASSED", failures);
     comm.finalize();
     return failures ? 1 : 0;

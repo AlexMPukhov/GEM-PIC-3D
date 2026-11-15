@@ -1,0 +1,42 @@
+# Plasma on one side of the beam (no axis of symmetry): a 1 GeV, 2 nC electron bunch passes a round plasma column
+# of 1e15 cm^-3 (radius 0.6 mm, centre at x = 0.8 mm, 50 um edge) at 200 um from its surface, 1 m in 500 steps.
+# The bunch is pulled into the plasma within 0.15 m and drives a half-bubble at the surface (README, "Plasma
+# channels of any cross-section"; generic numbers, a test of the code and not an accelerator layout).
+#   gempic3d examples/one_sided_plasma.deck          # 35 min on 24 cores, 5 GB
+grid {
+  lambda0       = 10 um
+  nx            = 256
+  ny            = 256
+  Lx            = 3.2 mm
+  Ly            = 3.2 mm
+  nzeta         = 301
+  window_length = 3 mm
+  dz            = 2 mm
+  dz_push       = 0.2 mm
+  z_end         = 1000 mm
+  move_x        = false
+  move_y        = false
+}
+plasma {
+  density = 1e15 cm^-3
+  density_function = "min(max((0.6 mm - sqrt((x - 0.8 mm)^2 + y^2)) / (50 um) + 0.5, 0), 1)"
+  ppc_x   = 2
+}
+bunch {
+  charge  = 2 nC
+  energy  = 1 GeV
+  sigma_x = 20 um
+  sigma_z = 200 um
+  emittance_x = 1 um
+  zeta_center = 2.3 mm
+  macroparticles = 400000
+}
+output {
+  dir = one_sided
+  every = 5
+  axis = true
+  fields = ez ex ne
+  beam_every = 100
+  particles = false
+  slice_length = 100 um
+}
