@@ -36,7 +36,16 @@ expressions).
 | | `zeta_center`, `x0`, `y0` | 0.75 window, 0, 0 | position of the centre in the window; transverse offset |
 | | `macroparticles`, `seed` | 100000, k (block number) | each bunch draws from its own seed |
 | | `shot_noise`, `noise_wavelength`, `beamlet` | random, —, 4 | `fawley`: bunching noise of the real electrons at noise_wavelength (Fawley, PRST-AB 5, 070701 (2002)) |
+| bunch (`file`) | `file` | — | the bunch is read from an openPMD particle file (this code, GEM-PIC-RZ, FBPIC, HiPACE++, WarpX, …; HDF5 build). Path relative to the working directory or to the deck. The shape keys (`energy`, `sigma_*`, `emittance_*`, `distribution_*`, `species`) are then not allowed: everything comes from the file (README, Bunches from files) |
+| | `file_species`, `file_iteration` | the only non-empty species, the last | species and iteration of the file |
+| | `select` | all | expression of x, y, z, ux, uy, uz, gamma: particles with a non-zero value are kept (z: position relative to the charge centroid of the species, momenta in m_e c) |
+| | `zeta_center` | — | the charge centroid of the selected particles is placed here (required) |
+| | `x0`, `y0` | 0 | transverse shift |
+| | `charge` | from the file | rescales the weights to this total charge |
+| | `macroparticles`, `resample_smoothing`, `seed` | as in the file, 0, k | resample to this number (systematic resampling with probabilities ∝ charge, equal weights); Gaussian jitter of the resampled particles in units of the rms of each coordinate |
 | numerics | `self_fields` | true | false: test particles in the laser only |
+| | `start_relax` | true | the start field of the bunches is the steady state of the discrete scheme (README, Initial field); false: the co-moving field of the continuum equations as it is (versions before 2026-11-15: an odd-even mode in s of 1–2 % of E⊥) |
+| | `box_mean` | keep | Fourier y with plasma: `keep` the currents at k⊥ = 0 (the box average: a 1D plasma wave, the return current of a beam), or `remove` them, so that no field has a box average (README, Periodic images) |
 | | `zeta_filter`, `k_filter` | true, true | current filters |
 | | `push_phase` | 0.05 rad | laser phase per RK4 sub-step |
 | laser (`type`) | `type` | plane_wave | `plane_wave` (analytic, above), `gaussian` (on the grid): `a0`, `wavelength`, `waist` *or* `profile_function(r)`, `tau_fwhm` *or* `envelope_function(zeta)`, `zeta_center`, `z_focus` (0), `cep`, `polarization` (linear, circular), `pol_angle`, `helicity`, `enabled`; or `file` (on the grid, below) |
@@ -72,6 +81,7 @@ expressions).
 | numerics | `iterations`, `predictor` | 2, extrapolate | passes per slice; prediction of the streaming current (`previous`: as GEM-PIC-RZ) |
 | | `vz_min`, `vz_beam`, `trap_advance` | 0.8, 0.9, 1 | trapping and return to streaming, as in GEM-PIC-RZ |
 | output | `dir`, `every`, `particles`, `frames` | out, 10, true, false | `every`: period of `diag.txt` and of the main output's fields; `particles`: start/end dumps; `frames`: frame_NNNNN.bin for the GUI |
+| | `slice_length` | 0 | > 0: `slices_NNNNNN.txt` with the moments of every beam species per slice of this length along ζ, at the steps of `diag.txt` |
 | | `checkpoint_every`, `walltime_hours` | 0, 0 | checkpoint every N steps; stop with a checkpoint (exit code 3) before this wall time (README, Checkpoints) |
 | | `fields`, `beam_every`, `beams`, `axis` | all, 0, all, false | main output group (README, Output): fields `ex ey ez bx by bz ne ni`, beams `bunch trapped injected` |
 | | `format`, `xi_stride`, `particle_stride` | native, 1, 1 | `native`, `openpmd` or `both` |
@@ -82,6 +92,13 @@ expressions).
 ⟨p_z⟩, ⟨γ⟩, ⟨p·k̂⟩ (along the laser), the rms of p_z, the position of the bunch in the pulse
 (η − η_c in FWHM), the local amplitude a0 g, and the field and kinetic energy in J. `particles_start.txt`
 and `particles_end.txt` hold the macroparticles.
+
+`bunches.txt` (as in GEM-PIC-RZ) has one line per output step and beam species (every bunch by its name, `trapped`,
+`inj_<ion>`): step, z [mm], name, number of macroparticles, charge [pC], mean kinetic energy [MeV], rms energy spread
+dE/E (of γ, accumulated centred), rms sizes σ_x, σ_y [µm], normalized rms emittances ε_nx, ε_ny [µm]
+(√(⟨x²⟩⟨u_x²⟩ − ⟨x u_x⟩²), centred), ⟨ζ⟩ and σ_z [µm], and the centroid ⟨x⟩, ⟨y⟩ [µm]. `slices_NNNNNN.txt`
+(`output.slice_length`) has the same columns per slice of ζ (name, slice centre [µm], then N … ⟨y⟩); empty slices are
+left out.
 
 `ionization.txt` (with ionizing ion blocks): per step and ionizing species, the step, z [mm], the name, the mean
 charge state and the charge freed in the step [pC], then the charge-state fractions f(0) … f(Zmax) of the ions that

@@ -88,3 +88,6 @@ void test_checkpoint();
 void test_lasy();
 void test_chicane();
 void test_undulator_radiation();
+void test_static_bunch();
+void test_beam_drift(double dz);
+void test_long_wake(bool extrap, int passes);

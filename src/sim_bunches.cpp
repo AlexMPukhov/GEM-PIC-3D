@@ -11,6 +11,13 @@ void Config::parse_bunches(const Deck& d) {
         const std::string b = k == 1 ? "bunch" : "bunch" + std::to_string(k);
         Bunch u;
         u.name = d.str(b, "name", b);
+        if (d.has(b, "file")) {                        // a bunch from an openPMD file (sim_bunch_file.cpp)
+            parse_bunch_file(d, b, u);
+            u.seed = (unsigned long)d.integer(b, "seed", k);
+            for (const auto& o : bunches) if (o.name == u.name) throw std::runtime_error(b + ".name: '" + u.name + "' given twice");
+            bunches.push_back(u);
+            continue;
+        }
         const std::string sp = d.str(b, "species", "electron");
         if (sp == "positron") u.q = 1;
         else if (sp != "electron") throw std::runtime_error(b + ".species must be electron or positron");
@@ -93,6 +100,7 @@ void Simulation::load_bunch() {
     const std::vector<Config::Bunch> list = cfg.bunch_list();
     for (size_t kb = 0; kb < list.size(); ++kb) {
     const Config::Bunch& B = list[kb];
+    if (B.from_file) { load_bunch_file(B, int(kb), mine, hlo, hhi, ylo, yhi, yoff); continue; }
     std::mt19937_64 rng(B.seed);
     std::normal_distribution<double> G(0, 1);
     std::uniform_real_distribution<double> U(-0.5, 0.5);
@@ -204,6 +212,7 @@ void Simulation::load_bunch() {
     }
     }
     set_particles(mine);
+    for (auto& B : cfg.bunches) std::vector<Config::Bunch::FileParticle>().swap(B.file_particles);   // loaded: free the file lists
     X0 = -0.5 * cfg.Lx; Y0 = -yoff;
 }
 

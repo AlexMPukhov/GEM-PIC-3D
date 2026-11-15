@@ -179,10 +179,13 @@ void Simulation::init() {
     load_bunch();
     s = 0; istep = 0;
     if (cfg.self_fields) {
+        starting_ = true;
         if (cfg.nbunch() > 1) comoving_fields_per_bunch();
         else { currents(); comoving_field(); }
+        if (cfg.start_relax) relax_start_field();
         add_grid_lasers();
         march(0.0);                 // E_z, B_z, L of the co-moving R; the sponge acts as in every step
+        starting_ = false;
         sponge_and_real_fields();
         const long n = long(ns + 1) * nk;
         cpx* a0 = j0x.data(); cpx* b0 = j0y.data(); const cpx* a1 = jkx.data(); const cpx* b1 = jky.data();

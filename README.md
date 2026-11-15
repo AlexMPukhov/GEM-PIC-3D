@@ -20,7 +20,7 @@ with the radiation of the bunch resolved on the grid and acting back on it
 
 ```
 make                      # build/gempic3d and build/tests (C++17, OpenMP, no external libraries)
-make test                 # 105 checks against analytic references, a few minutes on one core
+make test                 # 118 checks against analytic references, a few minutes on one core
 make physics              # ion collapse, undulator radiation energy: 13 s on an RTX 5090, 4.5 min on 24 cores
 make MPI=1 BUILD=build-mpi                 # MPI (mpicxx); test: sh tests/mpi.sh build-mpi/gempic3d
 make CUDA=1 CUDA_ARCH=-arch=sm_120 BUILD=build-gpu  # GPU (nvcc, cuFFT; sm_80 A100, sm_90 H100/GH200); add MPI=1 for both
@@ -128,6 +128,20 @@ E⊥ = −∇⊥ψ: one tridiagonal solve in ζ per (k_x, k_y). With the free-ha
 diagonalized once (symmetric tridiagonal eigenproblem in the dual-cell metric), and each (k_x, eigenvalue)
 is one tridiagonal solve in ζ. E_z, B_z and L then follow from the march with Δ = 0.
 
+**Start field = steady state of the scheme** (`numerics.start_relax`, default on). The co-moving field of the continuum
+equations is not exactly the steady state of the discrete scheme (TSC shape, ζ-filter, staggering of the currents). For
+the stiff modes, h Δ k⊥² ≫ 1, the trapezoidal rule in s keeps such a mismatch for ever, with the sign alternating from
+step to step: an odd-even mode in s. It showed as a change of 1.5 % of E⊥ of a rigid bunch in the first step (E_z near
+the bunch), the same again with the other sign in the second, and so on; in a beam-driven plasma wake that is tens of
+per cent of the wake's E_z at the bunch, the more the finer the transverse grid. The v = c part of the start field,
+R_c(β = 1), is therefore replaced by the steady state of the scheme for the same currents: three backward-Euler steps
+R¹ = R⁰ + D(F¹ − J¹) with the long step D = 100 Δ, done by the march itself (a mode converges
+by 1/(1 + hDk⊥²/2) per step, so every mode that is stiff at Δ is at rest; a longer D amplifies rounding); the 1/γ² part R_c(β) − R_c(1) of the co-moving field is kept. No term of the equations is
+changed, only the start. A rigid γ = 10⁶ bunch then keeps its fields to 1.4 × 10⁻⁵ of E⊥ per step from the
+first step, without alternation (0.5 … 1.4 × 10⁻⁵, also for σ_z = 2 h; 6 × 10⁻⁸ with D = 10⁴ Δ; check 29); the chicane moves the
+same relaxed field. The start field never holds the k⊥ = 0 current of the bunch (as in vacuum runs), also with plasma:
+a net current in the periodic box would start the bunch in a uniform E_z of its sheet charge.
+
 **Boundaries.** The transverse box is periodic (in x, and in y unless y is free-hand; then y ends at
 conducting walls). An absorbing sponge at the edges (`sponge` in x, `sponge_y` in y) damps the radiation
 part R − R_b of the forward field, where R_b = (1 + β)E⊥ with Tψ = ρ + γ⁻²T⁻¹∂_ζ²ρ is the bound field of
@@ -179,6 +193,66 @@ Stage 1 of the physics of GEM-PIC-RZ, with the same algorithm (`src/sim_plasma.c
   holds the moments of all bunches together; the beam files and openPMD have one species per bunch name.
 - **MPI:** the plasma march runs down the ranks along ζ (see Parallelism).
 - **Not yet:** profiles as expressions, chicanes and checkpoints (the next stages).
+
+## Plasma channels of any cross-section, periodic images
+
+`plasma.density_function` is an expression of x, y, z, r, so the plasma may have any cross-section: a hollow channel
+(`"r > 0.5 mm"`), walls with open sectors, two plasma bodies with a gap, a beam next to one wall. Edges should be
+ramps of a few cells (`"min(max((r - 0.475 mm) / (50 um), 0), 1)"`).
+
+- **Check against GEM-PIC-RZ** ([`benchmarks/rz/`](benchmarks/rz/README.md)): a 1 GeV, 2 nC bunch offset by one σ in
+  a round hollow channel at 10¹⁵ cm⁻³, 20 mm; GEM-PIC-RZ with the modes m = 0, 1. Energy loss +1.7 %, E_z at the
+  bunch and in the first wake period within 5 %, the dipole kick along the bunch within 0.6 %.
+- **Periodic images** (decision 2026-11-15: the box stays periodic; the error is measured by a box-size scan).
+  A plasma wall a few c/ω_p thick screens the images: in the benchmark the box size (3.2 → 6.4 mm, wall 4 c/ω_p)
+  changes the energy loss by 0.7 %. Where vacuum reaches the edge of the box (open sides), the images act at the
+  distance of the box size: scan `Lx`, `Ly`, or use the free-hand y between conducting walls for that direction.
+- **The box average (k⊥ = 0)** of the currents is kept with plasma (`numerics.box_mean = keep`): it holds the 1D
+  plasma wave of a wide laser and the part of a channel wake that is uniform over the bore. It also holds the mean
+  current of the bunch over the box, whose return current the plasma has to set up: an error that falls with the box
+  area. `box_mean = remove` drops all k⊥ = 0 currents instead; for channels this is worse (the benchmark: the wake
+  behind the bunch 30 % low in a 3.2 mm box) and it is meant for checks. The start field never has the k⊥ = 0
+  current of the bunch.
+- **Resolution:** the grid is uniform in x (and in y unless it is free-hand), so a thin bunch in a wide structure
+  costs modes. dx ≈ 0.6 σ_r of the bunch gave the energy loss and the kick to 1–2 % in the benchmark; check with
+  half the step.
+- **Steps:** `--check` warns when Δ h ω_p² > 8 (step × slice spacing × plasma frequency squared; the plasma march
+  needs about ≤ 4: at 25 the wake is wrong from the first step, check 31 runs at 6.25).
+
+## Bunches from files
+
+As in GEM-PIC-RZ (`src/beam_import.*` ported from there, `src/sim_bunch_file.cpp`; HDF5 build): a bunch block with
+`file` reads its particles from an openPMD 1.x particle file, of this code (`output.format = openpmd`), of GEM-PIC-RZ
+or of any other code (FBPIC, HiPACE++, WarpX, …). Electrons and positrons (charge and mass are checked).
+
+```
+bunch {
+  name        = driver
+  file        = stage1/openpmd/data_002000.h5   # relative to the working directory or to the deck
+  file_species = bunch                  # needed if the file holds several non-empty species
+  select      = "gamma > 1900"          # optional: keep these (x, y, z, ux, uy, uz, gamma)
+  zeta_center = 2.3 mm                  # charge centroid of the selected particles in the window
+  x0          = 20 um                   # optional shift; also y0, charge (rescale), macroparticles (resample)
+}
+```
+
+- **What is taken:** positions and momenta of every macroparticle with its weight, as they are (no resampling by
+  default). The longitudinal position is taken relative to the charge centroid and used as ζ, so the time of the file
+  does not matter; the particles start on the plane z = 0. Fields are not read: the bunch starts with its co-moving
+  self-field, as a generated bunch (γ: the mean of the file).
+- **Summary:** `--check` prints the file, species, iteration, the number of particles kept, and the moments of the
+  bunch: charge, γ, energy spread, rms sizes, normalized emittances, length.
+- **Resampling:** `macroparticles` different from the number in the file resamples to equal weights (systematic
+  resampling with probabilities ∝ charge); `resample_smoothing` adds a Gaussian jitter in units of the rms of each
+  coordinate (it avoids identical copies when the number grows, and adds to the slice energy spread).
+- **MPI:** every rank reads the file and keeps the particles of its slices. A restart takes the beam from the
+  checkpoint.
+- **Check (`tests/beam_import.sh`):** the moments in `bunches.txt` of a run equal those computed by python from its
+  openPMD particles; a bunch read back from that file has the same moments to the printed digits and the same
+  particles; selection, rescaled charge and resampling.
+
+`bunches.txt` holds the moments of every beam species per output step, `slices_NNNNNN.txt` (`output.slice_length`)
+the same per slice along ζ, e.g. the centroid and emittance of the tail of a bunch (`docs/input_deck.md`).
 
 ## Undulators and transport elements
 
@@ -500,6 +574,11 @@ diag.light {
 | LASY files (`type = file`, HDF5 build): cartesian file of the built-in Gaussian (a0 = 1, w = 12, τ = 25, `pol_angle` 0.3, `cep` 0.4) at its plane = built-in (start fields); `normalized_vector_potential` = `electric_field` of the same pulse; `a0` rescaling; thetaMode (C_0) = built-in (radial interpolation, dr = dx/4); thetaMode with m = 1 (cos, sin) = cartesian file of the same field; file at the focus with `file_z` = 3 z_R (k w = 6): envelope at z = 0 against an independent exact reference (Hankel transform per frequency); 20 steps in vacuum = built-in; CPU = RTX 5090 (CUDA build) | 1e-12; 2e-5; 0; 5e-4; 6e-4; 3e-5 (the paraxial one-frequency Gaussian differs by 5 %); 6e-12; same digits |
 | LASY file laser in `tests/mpi.deck` (a0 = 0.5, w = 40 µm, 0.16 ps, free-hand ζ): 2/3/4 ranks against 1 rank, CPU and CUDA + MPI builds; against the built-in Gaussian (τ interpolated between the file's samples on the free-hand ζ) | `diag.txt` identical; 1.3e-5 |
 | output groups and openPMD (`tests/openpmd.sh`): periods and selections of two groups, openPMD attributes and input deck, particles = native beam file, fields = native field file and axis file on a uniform grid | pass; 1.5e-7; exact; 1.5e-11 |
+| static bunch (rigid, γ = 10⁶) in vacuum, a lesson of GEM-PIC-RZ: change of all fields in the first and second step, relative to the largest E_x, for σ_z = 8 h, 16 h and 2 h | 0.5 … 1.4 × 10⁻⁵, the same sign in both steps (6 × 10⁻⁸ with a relaxation step of 10⁴ Δ, where E_z and E_x − B_y at the start are 10⁻¹⁰ … 7 × 10⁻⁹). Without `start_relax`: 1.5 % in step 1, 1.0 % back in step 2 (odd-even mode in s) |
+| intense beam in a drift (4 kA, γ = 1000, σ_r = 10 µm): radial momentum gained in one step by the electrons at 0.5 … 2 σ_r against E_r Δz/γ² (Gauss's law with the TSC widening), sub-step 50 and 500 k0⁻¹ | −0.6 %; −0.7 % (the push keeps E + v × B to 10⁻⁸ of E) |
+| long linear wake with large steps (as `tests/long_wake.sh` of GEM-PIC-RZ): rigid bunch, k_p σ = 1, window 60 c/ω_p, 8 steps of 100 c/ω_p (Δ h ω_p² = 6.25); k_p amplitude of E_z on the axis against the linear theory of the scheme; step 8 against step 6; with `predictor = previous` | −0.5 % (2 passes), +0.9 % (4 passes); 0.3 %; grows to 1200 times the theory |
+| bunches from files, `bunches.txt`, slices (`tests/beam_import.sh`, HDF5 build): moments of two bunches against python on the openPMD particles; slice moments; a bunch read back: moments and every particle; selection, rescaled charge, resampling to 50 000 | printed digits; printed digits; 7 × 10⁻¹⁵; exact charge, moments to 10⁻³ |
+| GEM-PIC-RZ, offset bunch in a round hollow plasma channel (`benchmarks/rz`, modes m = 0, 1): energy loss; E_z on the axis; dipole kick of 8 slices | +1.7 %; 5.2 %; 0.6 % |
 | all of the above on a real GPU (RTX 5090, `make CUDA=1`); `tests/emu_wake.cpp` GPU against CPU; `tests/mpi.sh` with CUDA + MPI | pass, equal to the CPU build to rounding; bit for bit; identical |
 | all of the above except the 3D beam wake in the GPU emulator (`make EMU=1 test`); the 3D beam wake there on a reduced grid (`tests/emu_wake.cpp`: 32 × 32 modes, Δζ = 1, 10 steps, Fourier and free-hand y) against the CPU build; `tests/mpi.sh build-emu-mpi/gempic3d`; FFTW build | pass; E_z on the axis identical bit for bit; pass, pass (both before the output groups; to be rerun) |
 
@@ -531,11 +610,14 @@ At 2.5 FWHM the residual A ~ 10⁻³ a0, amplified by the cross term 2p⊥0·A/h
   O(1 − v_z) for that part of the orbit.
 - **Periodic images.** The bound field of a relativistic bunch reaches γσ_z ≈ 0.5 mm. The images in the
   periodic box need a box-size scan; with the free-hand y the walls can be moved far out cheaply, while x
-  stays periodic.
+  stays periodic. In plasma a wall a few c/ω_p thick screens them (section "Plasma channels of any
+  cross-section, periodic images").
+- **New on 2026-11-15, not yet run on the GPU or in the GPU emulator with MPI:** `start_relax`, `box_mean`,
+  bunches from files, `bunches.txt` and the slice tables (checked on the CPU, with MPI and in the emulator build as
+  listed in CLAUDE.md).
 - **Free-hand y accuracy.** Second-order differences: the relative error of k_y² is about (k_y Δy)²/12, so
   structure in y needs ~20 cells per wavelength where it matters. The y grid is fixed, so it suits motion
   in the x–z plane; use Fourier y when the bunch moves in y.
 - **Grid fields over a step.** The grid fields are frozen at level s0 during the particle step, as in
   GEM-PIC-RZ; the laser is exact. Halving `dz` checks this.
-- **Performance.** No checkpoints yet; the GPU build has run only in the emulator. The
-  production deck needs about 13 GB in total (256 bytes per point), split over the MPI ranks.
+- **Memory.** About 256 bytes per grid point, split over the MPI ranks (13 GB for the oblique plane-wave deck).

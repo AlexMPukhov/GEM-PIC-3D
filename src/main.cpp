@@ -64,8 +64,14 @@ int main(int argc, char** argv) {
             if (rs < 0) sim.write_ionization(fi, true);
             char fn[64];
             // diag.txt and GUI frames every output.every steps (0: start and end only); output groups at their own periods
+            // with them: bunches.txt (moments per beam species) and, with output.slice_length, slices_NNNNNN.txt
+            FILE* fb = comm.rank == 0 ? open_table(c.dir + "/bunches.txt", rs) : nullptr;
+            bool bhead = rs < 0;
             auto frame = [&]() {
                 if (c.frames) { std::snprintf(fn, sizeof fn, "/frame_%05ld.bin", sim.istep); sim.write_frame(c.dir + fn); }
+                sim.write_bunches(fb, bhead);
+                bhead = false;
+                if (c.slice_length > 0) { std::snprintf(fn, sizeof fn, "/slices_%06ld.txt", sim.istep); sim.write_slices(c.dir + fn); }
             };
             if (rs < 0) {
                 frame();
@@ -101,6 +107,7 @@ int main(int argc, char** argv) {
             if (comm.rank == 0) {
                 std::fclose(f);
                 if (fi) std::fclose(fi);
+                if (fb) std::fclose(fb);
                 const double sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
                 std::printf("done: %ld steps, %.1f s\n", sim.istep, sec);
             }

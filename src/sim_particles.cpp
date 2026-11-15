@@ -140,7 +140,9 @@ void Simulation::currents() {
     fft_->run(jkz.data(), ns + 1, false);
     cpx* jx = jkx.data(); cpx* jy = jky.data();
     const double* fl = filt.data();
-    const bool keep0 = cfg.plasma_on;     // with plasma the k = 0 current is a 1D plasma wave, not a net current
+    // with plasma the k = 0 current is kept (a 1D plasma wave, the return current), but not in the start field:
+    // that is the vacuum field of the bunches, and a net current in a periodic box would give a uniform E_z
+    const bool keep0 = cfg.plasma_on && cfg.box_mean && !starting_;
     if (yfo) {
         // Fourier y: unpack the pair, apply the transverse filter (zero at the Nyquist modes, and at k = 0 in vacuum)
         const double* fly = filty.data();

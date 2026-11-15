@@ -248,6 +248,8 @@ Config Config::from_deck(const Deck& d) {
     c.every = int(d.integer("output", "every", 10));
     c.dump_particles = d.flag("output", "particles", true);
     c.frames = d.flag("output", "frames", false);
+    c.slice_length = d.num("output", "slice_length", Kind::Length, 0.0) / c.Lu;
+    if (c.slice_length < 0) throw std::runtime_error("output.slice_length must be >= 0");
     c.checkpoint_every = int(d.integer("output", "checkpoint_every", 0));
     c.walltime_hours = d.num("output", "walltime_hours", Kind::None, 0.0);
     if (c.checkpoint_every < 0 || c.walltime_hours < 0) throw std::runtime_error("output: checkpoint_every and walltime_hours must be >= 0");
@@ -328,6 +330,13 @@ Config Config::from_deck(const Deck& d) {
         c.groups.push_back(group(b, n, &c.groups[0]));
     }
     c.freeze_bunch = d.flag("numerics", "freeze_bunch", false);
+    c.start_relax = d.flag("numerics", "start_relax", true);
+    {
+        const std::string bm = d.str("numerics", "box_mean", "keep");
+        if (bm == "remove") c.box_mean = false;
+        else if (bm != "keep") throw std::runtime_error("numerics.box_mean must be keep or remove");
+        if (!c.box_mean && !c.y_fourier) throw std::runtime_error("numerics.box_mean = remove needs the Fourier y grid");
+    }
     c.deck_text = d.text();                            // the deck after overrides, stored in openPMD files
     d.check_unused();
     return c;
@@ -355,6 +364,13 @@ void Config::summary(FILE* f, int ranks) const {
                      a0, lambda0 / kL * 1e6, theta, pol.c_str(), tau * Tu * 1e12, start_fwhm, stop_fwhm);
     else std::fprintf(f, "  laser: off\n");
     for (const auto& b : bunch_list())
+        if (b.from_file)
+            std::fprintf(f, "  bunch %s: %s from %s\n    Q = %.6g pC, gamma = %.8g (%.6g MeV), dE/E = %.4g, sigma = %.5g x %.5g um, "
+                         "eps_n = %.5g x %.5g um, sigma_z = %.5g um, centre zeta = %.6g um, %ld macroparticles\n", b.name.c_str(),
+                         b.q > 0 ? "positrons" : "electrons", b.file_info.c_str(), b.charge * 1e12, b.gamma, (b.gamma - 1) * 0.51099895,
+                         b.file_espread, b.sigx * um, b.sigy * um, b.file_emitx * um, b.file_emity * um, b.sigz * um,
+                         b.zeta_center * um, b.nmacro);
+        else
         std::fprintf(f, "  bunch %s: %s, Q = %.4g pC, gamma = %g, sigma = %.3g x %.3g um, %s %.3g um, centre zeta = %.4g um, "
                      "offset %.3g, %.3g um, %ld macroparticles (%s noise)\n", b.name.c_str(), b.q > 0 ? "positrons" : "electrons",
                      b.charge * 1e12, b.gamma, b.sigx * um, b.sigy * um, b.length > 0 ? "flat-top length" : "sigma_z",
@@ -380,6 +396,13 @@ void Config::summary(FILE* f, int ranks) const {
                      n0 * nc * 1e-6, n0, parabolic ? "parabolic channel" : "uniform", r_max < 1e299 ? r_max * um : -1.0, ppc_x, ppc_y,
                      smooth_length * um, iterations, predictor_extrapolate ? "extrapolate" : "previous", vz_min, vz_beam);
     if (plasma_on && !density_fn.empty()) std::fprintf(f, "  plasma density_function(x, y, z, r) = %s\n", density_fn.text().c_str());
+    if (plasma_on) {                                   // stability of the streaming plasma: dz h omega_p^2 (necessary bound ~4)
+        double hmax = 0;
+        for (int m = 0; m + 1 < nzeta; ++m) hmax = std::max(hmax, dzeta(m));
+        const double st = dz * hmax * n0;
+        if (st > 8) std::fprintf(f, "  WARNING: dz * dzeta * omega_p^2 = %.3g (at the reference density): the plasma march needs about <= 4\n"
+                                    "    (tested to 6.25; at 25 the wake is wrong from the first step). Reduce dz or dzeta\n", st);
+    }
     for (const auto& s : ions)
         std::fprintf(f, "  ion %s: M = %.6g m_e, Z0 = %d, n_atom = %.4g n_e, %s%s\n", s.name.c_str(), s.mass, s.Z0, s.atoms,
                      s.mobile ? "mobile" : s.ionization ? "fixed" : "immobile background",
@@ -397,6 +420,7 @@ void Config::summary(FILE* f, int ranks) const {
                      g.native && g.openpmd ? "native + openPMD" : g.openpmd ? "openPMD" : "native", g.axis ? ", axis" : "",
                      g.xi_stride, g.particle_stride, g.dir.c_str());
     }
+    if (plasma_on && !box_mean) std::fprintf(f, "  box mean removed (numerics.box_mean = remove): no k_perp = 0 currents, the fields have no box average\n");
     if (freeze_bunch) std::fprintf(f, "  bunch frozen (numerics.freeze_bunch): not pushed, a rigid source\n");
     std::fprintf(f, "  self fields %s, zeta filter %s, transverse filter %s\n", self_fields ? "on" : "off", zeta_filter ? "on" : "off",
                  k_filter ? "on" : "off");

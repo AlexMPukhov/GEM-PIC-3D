@@ -37,6 +37,10 @@ int main(int argc, char** argv) {
     test_expr_functions();
     test_checkpoint();
     test_lasy();
+    test_static_bunch();
+    for (double dz : {50.0, 500.0}) test_beam_drift(dz);
+    test_long_wake(true, 2);
+    test_long_wake(false, 2);
     std::printf("%s: %d failure(s)\n", failures ? "FAILED" : "ALL PASSED", failures);
     comm.finalize();
     return failures ? 1 : 0;

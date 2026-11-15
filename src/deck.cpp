@@ -45,10 +45,20 @@ Deck Deck::read(const std::string& file) {
         }
         bool close = false;
         if (line.back() == '}') { close = true; line = trim(line.substr(0, line.size() - 1)); }
-        if (!line.empty()) {
-            auto eq = line.find('=');
+        // several assignments on a line, separated by ';' outside quotes: key = value; key2 = value2
+        std::vector<std::string> parts;
+        {
+            bool q = false; size_t st = 0;
+            for (size_t c = 0; c <= line.size(); ++c) {
+                if (c < line.size() && line[c] == '"') q = !q;
+                if (c == line.size() || (line[c] == ';' && !q)) { parts.push_back(trim(line.substr(st, c - st))); st = c + 1; }
+            }
+        }
+        for (const std::string& part : parts) {
+            if (part.empty()) continue;
+            auto eq = part.find('=');
             if (eq == std::string::npos) throw err("expected 'key = value'");
-            d.set(block, trim(line.substr(0, eq)), trim(line.substr(eq + 1)), ln);
+            d.set(block, trim(part.substr(0, eq)), trim(part.substr(eq + 1)), ln);
         }
         if (close) block.clear();
     }

@@ -104,12 +104,13 @@ void Simulation::stream_spectra() {
     const double a2 = cfg.smooth_length * cfg.smooth_length;
     if (yf) {
         const double* fly = filty.data(); const double* kys_ = kys.data();
+        const bool keep0 = cfg.box_mean;
         par_for(nk, [=] HD(long i) {
             const int ixx = int(i % nx), j = int(i / nx);
             const long m = long((ny - j) % ny) * nx + (nx - ixx) % nx;
             const cpx z = pk[i], zm = conj(pk[m]);
             const double k2 = kxs_[ixx] * kxs_[ixx] + kys_[j] * kys_[j];
-            const double f = fl[ixx] * fly[j] / (1 + a2 * k2);
+            const double f = (ixx == 0 && j == 0 && !keep0) ? 0.0 : fl[ixx] * fly[j] / (1 + a2 * k2);
             ox[i] = f * (0.5 * (z + zm)); oy[i] = f * (0.5 * C((z - zm).im, -(z - zm).re)); oz[i] = f * pk[nkk + i];
         });
         device_sync();

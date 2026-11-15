@@ -71,10 +71,18 @@ struct Config {
         // ux_function, uy_function(x, y, r, zeta): mean transverse momenta (the energy is kept)
         Expr profile_z, gamma_fn, profile_r, ux_fn, uy_fn;
         double zeta_min = 0, zeta_max = 0, r_extent = 0;
+        // bunch.file: the particles of an openPMD file after selection and placement (code units; w: real
+        // particles), their moments for the summary, resampling
+        struct FileParticle { double x, y, zeta, ux, uy, uz, w; };
+        std::vector<FileParticle> file_particles;
+        std::string file_info;
+        bool from_file = false;
+        double resample_smoothing = 0, file_espread = 0, file_emitx = 0, file_emity = 0;
     };
     std::vector<Bunch> bunches;
     std::vector<Bunch> bunch_list() const;             // `bunches`, or the single bunch of the fields above
     void parse_bunches(const Deck& d);                 // sim_bunches.cpp
+    void parse_bunch_file(const Deck& d, const std::string& b, Bunch& u);   // bunch.file (sim_bunch_file.cpp)
     // undulators and transport elements (blocks undulator, quadrupole, plasma_lens, solenoid; code units)
     std::vector<Undulator> undulators;
     std::vector<Magnet> magnets;
@@ -139,7 +147,8 @@ struct Config {
     int every = 10;
     bool dump_particles = true;
     bool frames = false;                               // output.frames: frame_NNNNN.bin every output step (GUI)
-    int checkpoint_every = 0;                          // output.checkpoint_every: steps between checkpoints (0: none)
+    double slice_length = 0;                           // output.slice_length: slices_NNNNNN.txt (0: none)
+    int checkpoint_every = 0;                        // output.checkpoint_every: steps between checkpoints (0: none)
     double walltime_hours = 0;                         // output.walltime_hours: checkpoint and stop before this limit
     // output groups, as in QUARZ: [0] the main output (block output), then the diagnostics named in diag.names
     // (blocks diag.<name>), each with its own period, selection of fields and beams, and format
@@ -159,6 +168,10 @@ struct Config {
     bool openpmd = false;                              // some group writes openPMD
     std::string deck_text;
     bool freeze_bunch = false;                         // numerics.freeze_bunch: the bunch is not pushed (rigid source)
+    bool start_relax = true;                           // numerics.start_relax: the start field of the bunches is relaxed to
+                                                       // the steady state of the discrete scheme (no odd-even mode in s)
+    bool box_mean = true;                              // numerics.box_mean = keep: with plasma the k_perp = 0 currents are
+                                                       // kept; remove: the fields have no box average (Fourier y)
 
     static Config from_deck(const Deck& d);
     void parse_ions(const Deck& d);                   // ion blocks and plasma.free_electrons (sim_ions.cpp)
@@ -214,6 +227,8 @@ public:
     bool finished() const { return s >= cfg.z_end - 1e-9 || stop_; }
     void diagnostics(FILE* f, bool header);        // collective; f is used on rank 0 only
     void dump_particles(const std::string& file);  // collective
+    void write_bunches(FILE* f, bool header);       // collective: bunches.txt (sim_bunch_diag.cpp)
+    void write_slices(const std::string& file);     // collective: slices_NNNNNN.txt
     // collective: fields in the planes y = 0 and x = 0 (GUI frames, and the native field files of a group)
     void write_frame(const std::string& file, int comps = 255);
     void write_axis(const std::string& file);       // collective: axis lineouts (axis_NNNNNN.txt)
@@ -240,6 +255,9 @@ public:
     int N = 0, a = 0, b = 0, ns = 0, nk = 0;          // nk = nx * ny points of a plane, index j*nx + ix
     double dx = 0, dy = 0, s = 0, X0 = 0, Y0 = 0;     // dy, Y0: Fourier y only (free-hand y: Y0 = 0)
     bool yf = true;                                    // cfg.y_fourier
+    bool comoving_c_ = false;                          // comoving_field(): the v = c field (beta = 1), beta_b kept
+    void relax_start_field();                          // start field: steady state of the discrete scheme (sim_fields.cpp)
+    bool starting_ = false;                            // init(): the start field is the vacuum field of the bunches (no k_perp = 0 current)
     long istep = 0;
     double field_energy = 0;
     double beta_b = 1, gm2_b = 0;           // mean beta of the bunch at the start, 1 - beta^2 (bound field of the sponge)
@@ -306,6 +324,8 @@ public:
 
     // internal steps (public because nvcc forbids device lambdas in private member functions)
     void load_bunch();
+    void load_bunch_file(const Config::Bunch& B, int kb, std::vector<Particle>& mine, int hlo, int hhi, double ylo, double yhi,
+                         double yoff);
     void comoving_field();
     void comoving_fields_per_bunch();   // several bunches: each with its own beta, summed (sim_bunches.cpp)
     void apply_chicanes(double s0, double s1);   // thin chicanes passed in this step (sim_external.cpp)

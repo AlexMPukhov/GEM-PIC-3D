@@ -46,9 +46,9 @@ void Simulation::comoving_field() {
     for (auto& p : host_particles())
         if (p.alive == 1) { sums[0] += p.w * p.pz / std::sqrt(1 + p.px * p.px + p.py * p.py + p.pz * p.pz); sums[1] += p.w; }
     comm.allreduce_sum(sums, 2);
-    const double beta = sums[1] > 0 ? sums[0] / sums[1] : 1;
+    const double beta = comoving_c_ ? 1 : sums[1] > 0 ? sums[0] / sums[1] : 1;
     const double gm2 = 1 - beta * beta;
-    beta_b = beta; gm2_b = gm2;
+    if (!comoving_c_) { beta_b = beta; gm2_b = gm2; }
     const size_t pl = size_t(nk);
     const long nkk = nk;
     const int nx = cfg.nx, ny = cfg.ny;
@@ -371,4 +371,40 @@ void Simulation::add_grid_lasers() {
             device_sync();
         }
     }
+}
+
+// Start field without the odd-even mode in s (numerics.start_relax). The co-moving field of the continuum
+// equations is not exactly the steady state of the discrete scheme (TSC shape, zeta filter, staggering); for the
+// stiff modes, h Delta k_perp^2 >> 1, the trapezoidal rule in s keeps such a mismatch for ever, with the sign
+// alternating from step to step (E_z near the bunch, a few per cent of E_perp). Here the v = c part of the field,
+// R_c(beta = 1), is replaced by the steady state of the scheme for the same currents: a few backward-Euler steps
+// R1 = R0 + D (F1 - J1) with the long step D = 100 dz (a mode converges by
+// 1 / (1 + h D k^2 / 2) per step: all modes that are stiff at dz), done with the march itself (level s0: E_z = B_z = 0 and no current, so its
+// explicit part is zero). The 1 / gamma^2 part R_c(beta) - R_c(1) of the co-moving field is kept as it is.
+void Simulation::relax_start_field() {
+    const long n = long(ns) * nk, nj = long(ns + 1) * nk;
+    Buf<cpx> dx_(n), dy_(n);
+    {
+        cpx* ax = dx_.data(); cpx* ay = dy_.data(); const cpx* rx = Rx.data(); const cpx* ry = Ry.data();
+        par_for(n, [=] HD(long i) { ax[i] = rx[i]; ay[i] = ry[i]; });
+        device_sync();
+    }
+    comoving_c_ = true; comoving_field(); comoving_c_ = false;
+    {
+        cpx* ax = dx_.data(); cpx* ay = dy_.data(); const cpx* rx = Rx.data(); const cpx* ry = Ry.data();
+        par_for(n, [=] HD(long i) { ax[i] = ax[i] - rx[i]; ay[i] = ay[i] - ry[i]; });
+        device_sync();
+    }
+    const double D = 100 * cfg.dz;      // (1e4 dz amplified rounding: 2 ranks differed from 1 in the last printed digit)
+    for (int it = 0; it < 3; ++it) {
+        cpx* ez = Ez.data(); cpx* bz = Bz.data(); cpx* a0 = j0x.data(); cpx* b0 = j0y.data();
+        par_for(n, [=] HD(long i) { ez[i] = C(0); bz[i] = C(0); });
+        par_for(nj, [=] HD(long i) { a0[i] = C(0); b0[i] = C(0); });
+        device_sync();
+        march(D);
+        comm.wait_sends();
+    }
+    cpx* rx = Rx.data(); cpx* ry = Ry.data(); const cpx* ax = dx_.data(); const cpx* ay = dy_.data();
+    par_for(n, [=] HD(long i) { rx[i] = rx[i] + ax[i]; ry[i] = ry[i] + ay[i]; });
+    device_sync();
 }
