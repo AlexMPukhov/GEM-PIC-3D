@@ -86,6 +86,7 @@ void test_expr_profiles();
 void test_expr_functions();
 void test_checkpoint();
 void test_lasy();
+void test_density_file();
 void test_chicane();
 void test_undulator_radiation();
 void test_static_bunch();

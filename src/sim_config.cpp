@@ -51,7 +51,17 @@ double Config::plasma_density(double x, double y, double z) const {
     const double r2 = x * x + y * y;
     if (r2 >= r_max * r_max) return 0;
     double f = 1;
-    if (!pz_points.empty()) {
+    if (dfile) {   // value of the file, relative to n0
+        const double zf = z - dfile_z;
+        double v;
+        if (dfile->geometry == "xyz") v = dfile->at(zf, x, y, dfile_hold);
+        else if (dfile->geometry == "rz") v = dfile->at(zf, std::sqrt(r2), 0.0, dfile_hold);
+        else {
+            v = dfile->at(zf, 0.0, 0.0, dfile_hold);
+            if (!dfile_trans.empty()) v *= std::max(0.0, dfile_trans({std::sqrt(r2), x, y}));
+        }
+        f = dfile->absolute ? v / n0 : v;
+    } else if (!pz_points.empty()) {
         if (z <= pz_points.front()) f = pz_values.front();
         else if (z >= pz_points.back()) f = pz_values.back();
         else {
@@ -64,6 +74,111 @@ double Config::plasma_density(double x, double y, double z) const {
     double g = parabolic ? 1 + channel_depth * r2 / (r_channel * r_channel) : 1.0;
     if (!density_fn.empty()) g *= std::max(0.0, density_fn({x, y, z, std::sqrt(r2)}));
     return f * g > 0 ? n0 * f * g : 0.0;
+}
+
+// plasma.density_file: a profile in the format of docs/density_file.md (geometries xyz, rz, z); summary and checks
+static void read_density_file(const Deck& d, Config& c) {
+    for (const char* k : {"z_points", "z_values"})
+        if (d.has("plasma", k))
+            throw std::runtime_error(std::string("plasma.") + k + ": the longitudinal profile is given by density_file (remove it, or remove density_file)");
+    const std::string path = d.str("plasma", "density_file");
+    densfile::DensityFileUnits u;
+    auto conv = [](double x, const std::string& unit, Kind kind) {
+        char b[64];
+        std::snprintf(b, sizeof b, "%.17g ", x);
+        try { return parse_with_unit(b + unit, kind, "unit"); }
+        catch (const std::exception& e) { throw std::invalid_argument(e.what()); }
+    };
+    const double Lu = c.Lu, nc = c.nc;
+    u.length = [conv, Lu](double x, const std::string& unit) {
+        if (unit.empty()) throw std::invalid_argument("a length needs a unit (nm, um, mm, cm, m)");
+        return conv(x, unit, Kind::Length) / Lu;
+    };
+    u.density = [conv, nc](double x, const std::string& unit) { return conv(x, unit, Kind::Density) / nc; };
+    auto D = std::make_shared<densfile::DensityFile>(densfile::readDensityFile(
+        path, d.str("plasma", "file_mesh", ""), d.integer("plasma", "file_iteration", -1), u));
+    if (D->geometry == "xz")
+        throw std::runtime_error(path + ": geometry xz: a Cartesian 2D profile n(x, z) has no rule for y; GEM-PIC-3D reads "
+                                        "geometry xyz, rz (rotated about the axis) and z");
+    if (!D->transverse.empty()) {
+        try { c.dfile_trans = Expr(D->transverse, {"r", "x", "y"}, {}, d.unit_fn()); }
+        catch (const std::invalid_argument& e) { throw std::runtime_error(path + ": transverse function '" + D->transverse + "': " + e.what()); }
+    }
+    c.dfile = D;
+    c.dfile_z = d.num("plasma", "file_z", Kind::Length, 0.0) / c.Lu;
+    const std::string out = d.str("plasma", "file_outside", "zero");
+    if (out != "zero" && out != "hold") throw std::runtime_error("plasma.file_outside must be zero or hold");
+    c.dfile_hold = out == "hold";
+    // ---- summary: ranges against the run, peak; warnings
+    const densfile::DensityFile& F = *D;
+    const double um = c.Lu * 1e6, mm = um * 1e-3;
+    char buf[640];
+    const std::string kind = F.absolute ? "absolute density [" + F.nUnit + "]" : std::string("factor on 'density'");
+    const size_t nz = F.z.size(), na = F.na(), nb = F.nb();
+    if (F.geometry == "xyz")
+        std::snprintf(buf, sizeof buf, "plasma density file %s (%s; %s): n(x, y, z) on %zu x %zu x %zu points, %s", F.path.c_str(),
+                      F.format.c_str(), F.detail.c_str(), na, nb, nz, kind.c_str());
+    else if (F.geometry == "rz")
+        std::snprintf(buf, sizeof buf, "plasma density file %s (%s; %s): n(r, z) on %zu x %zu points, rotated about the axis, %s",
+                      F.path.c_str(), F.format.c_str(), F.detail.c_str(), na, nz, kind.c_str());
+    else
+        std::snprintf(buf, sizeof buf, "plasma density file %s (%s; %s): n(z) on %zu points, %s", F.path.c_str(), F.format.c_str(),
+                      F.detail.c_str(), nz, kind.c_str());
+    c.dfile_info.push_back(buf);
+    const double za = F.z.front() + c.dfile_z, zb = F.z.back() + c.dfile_z;
+    std::snprintf(buf, sizeof buf, "  z = %.6g ... %.6g mm (run: 0 ... %.6g mm)", za * mm, zb * mm, c.z_end * mm);
+    std::string rng = buf;
+    if (F.geometry == "xyz") {
+        std::snprintf(buf, sizeof buf, ", x = %.6g ... %.6g um, y = %.6g ... %.6g um (box: +- %.6g, +- %.6g um)", F.a.front() * um,
+                      F.a.back() * um, F.b.front() * um, F.b.back() * um, 0.5 * c.Lx * um, 0.5 * c.Ly * um);
+        rng += buf;
+    } else if (F.geometry == "rz") {
+        std::snprintf(buf, sizeof buf, ", r = %.6g ... %.6g um", F.a.front() * um, F.a.back() * um);
+        rng += buf;
+    }
+    c.dfile_info.push_back(rng);
+    const double pk = F.peak * (F.absolute ? 1.0 : c.n0);
+    std::snprintf(buf, sizeof buf, "  peak %.4g cm^-3 (%.4g n_c) at z = %.6g mm", pk * c.nc * 1e-6, pk, (F.zPeak + c.dfile_z) * mm);
+    c.dfile_info.push_back(buf);
+    if (!c.dfile_trans.empty()) c.dfile_info.push_back("  times the transverse function of the file, T(r, x, y) = " + F.transverse);
+    c.dfile_info.push_back(c.dfile_hold ? "  outside the file: the edge values are continued (file_outside = hold)"
+                                        : "  outside the file the density is zero");
+    if (!c.dfile_hold && (zb <= 0.0 || za >= c.z_end)) {
+        std::snprintf(buf, sizeof buf, "plasma.density_file: the file covers z = %.6g ... %.6g mm, outside the run (0 ... %.6g mm): no "
+                      "density (shift it with file_z, the z of the run at the file's z = 0)", za * mm, zb * mm, c.z_end * mm);
+        throw std::runtime_error(buf);
+    }
+    auto plane_max = [&](size_t i) {
+        double m = 0;
+        for (size_t j = 0; j < na * nb; ++j) m = std::max(m, F.v[i * na * nb + j]);
+        return m / F.peak;
+    };
+    const double tol = 1e-9 * std::max(1.0, c.z_end);
+    auto cut = [&](const char* what, double pos, double frac) {
+        if (frac <= 0.01) return;
+        std::snprintf(buf, sizeof buf, "the plasma density file %s at z = %.6g mm with %.3g %% of its peak; beyond it the density is "
+                      "zero (a jump): extend the file, or set file_outside = hold", what, pos, 100.0 * frac);
+        c.dfile_warn.push_back(buf);
+    };
+    if (!c.dfile_hold) {
+        if (za > tol) cut("starts", za * mm, plane_max(0));
+        if (zb < c.z_end - tol) cut("ends", zb * mm, plane_max(nz - 1));
+    }
+    double q = 0, qpos = 0;   // gradient along z against the step dz (the plasma is loaded once per step)
+    for (size_t i = 0; i + 1 < nz; ++i) {
+        const double a = F.z[i] + c.dfile_z, b = F.z[i + 1] + c.dfile_z;
+        if (b <= 0.0 || a >= c.z_end) continue;
+        for (size_t j = 0; j < na * nb; ++j) {
+            const double s = std::fabs(F.v[(i + 1) * na * nb + j] - F.v[i * na * nb + j]) / (b - a) * c.dz / F.peak;
+            if (s > q) { q = s; qpos = 0.5 * (a + b); }
+        }
+    }
+    if (q > 0.25) {
+        std::snprintf(buf, sizeof buf, "the plasma density file changes by %.3g %% of its peak per step (dz = %.4g um) at z = %.6g mm: "
+                      "scale length n_peak / |dn/dz| = %.4g um, less than 4 steps; the steps do not resolve this gradient", 100.0 * q,
+                      c.dz * um, qpos * mm, c.dz / q * um);
+        c.dfile_warn.push_back(buf);
+    }
 }
 
 Config Config::from_deck(const Deck& d) {
@@ -214,7 +329,14 @@ Config Config::from_deck(const Deck& d) {
             for (size_t k = 1; k < c.pz_points.size(); ++k)
                 if (!(c.pz_points[k] > c.pz_points[k - 1])) throw std::runtime_error("plasma.z_points must increase");
         }
+        if (d.has("plasma", "density_file")) read_density_file(d, c);
+        else
+            for (const char* k : {"file_z", "file_outside", "file_mesh", "file_iteration"})
+                if (d.has("plasma", k)) throw std::runtime_error(std::string("plasma.") + k + " is only used with plasma.density_file");
         const std::string prof = d.str("plasma", "profile", "uniform");
+        if (c.dfile && d.has("plasma", "profile") && (c.dfile->geometry != "z" || !c.dfile_trans.empty()))
+            throw std::runtime_error("plasma.profile: the density_file holds the transverse profile (remove profile; r_max and "
+                                     "density_function still apply)");
         if (prof == "parabolic") {
             c.parabolic = true;
             c.channel_depth = d.num("plasma", "channel_depth", Kind::None);
@@ -395,6 +517,8 @@ void Config::summary(FILE* f, int ranks) const {
         std::fprintf(f, "  plasma: n0 = %.4g cm^-3 (%.4g n_c), %s, r_max = %.4g um, %d x %d per cell, smooth_length %.4g um; %d passes per slice, predictor %s, vz_min %.3g, vz_beam %.3g\n",
                      n0 * nc * 1e-6, n0, parabolic ? "parabolic channel" : "uniform", r_max < 1e299 ? r_max * um : -1.0, ppc_x, ppc_y,
                      smooth_length * um, iterations, predictor_extrapolate ? "extrapolate" : "previous", vz_min, vz_beam);
+    for (const auto& l : dfile_info) std::fprintf(f, "  %s\n", l.c_str());
+    for (const auto& l : dfile_warn) std::fprintf(f, "  WARNING: %s\n", l.c_str());
     if (plasma_on && !density_fn.empty()) std::fprintf(f, "  plasma density_function(x, y, z, r) = %s\n", density_fn.text().c_str());
     if (plasma_on) {                                   // stability of the streaming plasma: dz h omega_p^2 (necessary bound ~4)
         double hmax = 0;

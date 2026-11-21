@@ -59,6 +59,9 @@ expressions).
 | plasma | `density` | — | cm^-3 or n_c |
 | | `free_electrons` | true | false: a neutral gas, all electrons come from field ionization (ion blocks with `charge_state = 0`) |
 | | `z_points`, `z_values` | — | longitudinal profile (relative), linear between the points |
+| | `density_file` | — | the profile from a file in the format of [density_file.md](density_file.md) (text table or openPMD mesh; the header defines the geometry): n(x, y, z), n(r, z) (rotated about the axis) or n(z), the latter with an optional transverse function in the file. A density with a unit in the file is the absolute density (`density` then only the reference n0), without unit a factor on `density`. Replaces `z_points`; `profile` only with a plain n(z) file; `r_max` and `density_function` still apply |
+| | `file_z`, `file_outside` | 0, zero | with `density_file`: z of the run at the file's z = 0; the density beyond the file, `zero` or `hold` (edge values) |
+| | `file_mesh`, `file_iteration` | density, last | with an openPMD `density_file`: mesh and iteration |
 | | `profile`, `channel_depth`, `r_channel` | uniform | `parabolic`: n0 (1 + depth r²/r_channel²) |
 | | `r_max`, `ppc_x`, `ppc_y` | ∞, 2, ppc_x | column radius, electrons per cell |
 | | `smooth_length` | 0 | bubble closure: smoothing length of the plasma currents |

@@ -37,6 +37,7 @@ int main(int argc, char** argv) {
     test_expr_functions();
     test_checkpoint();
     test_lasy();
+    test_density_file();
     test_static_bunch();
     for (double dz : {50.0, 500.0}) test_beam_drift(dz);
     test_long_wake(true, 2);

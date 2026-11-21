@@ -160,6 +160,15 @@ Stage 1 of the physics of GEM-PIC-RZ, with the same algorithm (`src/sim_plasma.c
   the points, constant beyond them), uniform or `parabolic` channel (`channel_depth` at `r_channel`), column
   radius `r_max`, `ppc_x` × `ppc_y` electrons per cell on a regular lattice. Without `ion` blocks the ions are an
   immobile background (see "Ions and field ionization").
+- **Profile from a file:** `plasma.density_file` reads the density from a file in the format of
+  [`docs/density_file.md`](docs/density_file.md), shared with GEM-PIC-RZ and QUARZ (measured gas jets, fluid or
+  hydrodynamic simulations). The header of the file defines the geometry: n(x, y, z) for a target of any shape,
+  n(r, z) (rotated about the propagation axis) or n(z), the latter with an optional transverse function
+  (`# transverse = "exp(-(r / (50 um))^2)"`). Text table (coordinates in columns, or the axes in the header and the
+  values alone) or openPMD mesh (HDF5 build). A density with a unit is the absolute density, without unit a
+  factor on `density`. Linear interpolation; zero outside the file (`file_outside = hold`: edge values);
+  `file_z` shifts the file. The run summary prints the ranges of the file against the run and the peak, and warns
+  if the file is cut at a finite density or has gradients shorter than 4 steps.
 - **Streaming electrons:** fresh plasma is loaded at the front of the window in every step and streams to the
   rear. Per half-cell n, in `numerics.iterations` passes (default 2; 1 is unstable): the electrons are pushed
   from ζ_{n+1} to ζ_n by Boris with dt = h/(1 − v_z) in the fields of slice n+1 (final) and slice n, their

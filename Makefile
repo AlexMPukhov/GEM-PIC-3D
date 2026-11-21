@@ -7,7 +7,7 @@
 # make physics         larger physics checks (ion collapse), minutes on a GPU or a 24-core node
 # make HDF5=1          openPMD output (output.format = openpmd) with HDF5 (pkg-config hdf5); combine with the others
 SIM = src/sim_bunch_diag.cpp src/sim_bunch_file.cpp src/beam_import.cpp src/sim_config.cpp src/sim_setup.cpp src/sim_particles.cpp src/sim_fields.cpp src/sim_plasma.cpp src/sim_ions.cpp src/sim_bunches.cpp src/sim_external.cpp src/sim_checkpoint.cpp src/sim_output.cpp
-SRC = src/deck.cpp src/grid.cpp $(SIM) src/comm.cpp src/openpmd.cpp src/laser_file.cpp src/atomic_data.cpp src/ionization.cpp src/expr.cpp
+SRC = src/deck.cpp src/grid.cpp $(SIM) src/comm.cpp src/openpmd.cpp src/laser_file.cpp src/DensityFile.cpp src/atomic_data.cpp src/ionization.cpp src/expr.cpp
 HDR = $(wildcard src/*.hpp src/emu/*.h)
 BUILD ?= build
 ifeq ($(CUDA),1)
@@ -40,7 +40,7 @@ endif
 ifeq ($(HDF5),1)
   HDF5_CFLAGS ?= $(shell pkg-config --cflags hdf5 2>/dev/null || echo -I/usr/include/hdf5/serial)
   HDF5_LIBS ?= $(shell pkg-config --libs hdf5 2>/dev/null || echo -L/usr/lib/x86_64-linux-gnu/hdf5/serial -lhdf5)
-  CXXFLAGS += -DGEMPIC_HDF5 $(HDF5_CFLAGS)
+  CXXFLAGS += -DGEMPIC_HDF5 -DDENSITY_FILE_USE_HDF5 $(HDF5_CFLAGS)
   LDLIBS += $(HDF5_LIBS)
 endif
 
@@ -48,7 +48,7 @@ all: $(BUILD)/gempic3d $(BUILD)/tests
 $(BUILD)/gempic3d: $(SRC) src/main.cpp $(HDR)
 	@mkdir -p $(BUILD)
 	$(CXX) $(CXXFLAGS) -o $@ $(SRC) src/main.cpp $(LDLIBS)
-TESTS = tests/tests.cpp tests/test_fields.cpp tests/test_bunch.cpp tests/test_plasma.cpp tests/test_ions.cpp tests/test_ionization.cpp tests/test_bunches.cpp tests/test_external.cpp tests/test_expr.cpp tests/test_checkpoint.cpp tests/test_radiation.cpp tests/test_lasy.cpp tests/test_lessons.cpp
+TESTS = tests/tests.cpp tests/test_fields.cpp tests/test_bunch.cpp tests/test_plasma.cpp tests/test_ions.cpp tests/test_ionization.cpp tests/test_bunches.cpp tests/test_external.cpp tests/test_expr.cpp tests/test_checkpoint.cpp tests/test_radiation.cpp tests/test_lasy.cpp tests/test_lessons.cpp tests/test_density_file.cpp
 $(BUILD)/tests: $(SRC) $(TESTS) tests/test_util.hpp $(HDR)
 	@mkdir -p $(BUILD)
 	$(CXX) $(CXXFLAGS) -Isrc -o $@ $(SRC) $(TESTS) $(LDLIBS)

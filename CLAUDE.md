@@ -57,6 +57,7 @@ Container setup: `apt-get update && apt-get install -y libhdf5-dev pkg-config op
 | `src/sim_stream.hpp` | device code of the streaming particles: Boris push, deposit, ADK ionization, one half-cell |
 | `src/sim_ions.cpp` | ion blocks of the deck, ADK tables on the device, `ionization.txt` |
 | `src/external.hpp`, `src/sim_external.cpp` | undulators and transport elements: fields, deck blocks, push sub-steps |
+| `src/DensityFile.*` | reader of density profile files (docs/density_file.md; the same two files as in QUARZ, independent of the code); used by `plasma.density_file` in `Config::plasma_density`, read and checked in `sim_config.cpp` |
 | `src/expr.*` | expressions of the deck (from RZ); `Deck::expr`, `constants`, values as expressions in `Deck::num` |
 | `src/laser_file.*`, `src/h5read.hpp` | LASY envelope files (from RZ): reader, writer (tests), exact propagation to z = 0; HDF5 read helper |
 | `src/sim_checkpoint.cpp` | checkpoints per rank, restart, `latest` |

@@ -14,6 +14,7 @@
 #include <string>
 #include <vector>
 #include "comm.hpp"
+#include "DensityFile.hpp"
 #include "deck.hpp"
 #include "fftmany.hpp"
 #include "grid.hpp"
@@ -107,6 +108,13 @@ struct Config {
     std::vector<double> pz_points, pz_values;
     bool parabolic = false;
     Expr density_fn;                                  // plasma.density_function(x, y, z, r): a factor (< 0 counts as 0)
+    // plasma.density_file (docs/density_file.md): n(x, y, z), n(r, z) or n(z) [x its transverse function] from a
+    // file, replaces the table f(z); absolute density or a factor on n0; zero outside the file unless dfile_hold
+    std::shared_ptr<const densfile::DensityFile> dfile;
+    double dfile_z = 0;                               // z of the run at the file's z = 0
+    bool dfile_hold = false;
+    Expr dfile_trans;                                 // transverse function T(r, x, y) of a file with geometry z
+    std::vector<std::string> dfile_info, dfile_warn;  // lines of the run summary
     int ppc_x = 2, ppc_y = 2;
     // streaming particles (as in GEM-PIC-RZ): passes per slice, trapping and return to streaming
     int iterations = 2;
