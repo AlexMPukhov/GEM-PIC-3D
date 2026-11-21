@@ -26,7 +26,8 @@ make MPI=1 BUILD=build-mpi                 # MPI (mpicxx); test: sh tests/mpi.sh
 make CUDA=1 CUDA_ARCH=-arch=sm_120 BUILD=build-gpu  # GPU (nvcc, cuFFT; sm_80 A100, sm_90 H100/GH200); add MPI=1 for both
 make EMU=1 BUILD=build-emu test emu-selftest   # the GPU code paths on the CPU (GPU emulator, see Parallelism)
 make FFTW=1 BUILD=build-fftw               # optional: FFTW 3 instead of the own FFT (CPU builds)
-make HDF5=1 BUILD=build-h5                 # optional: openPMD output (HDF5); test: sh tests/openpmd.sh build-h5/gempic3d
+make HDF5=1 BUILD=build-h5                 # optional: openPMD output (HDF5 1.12 or newer; HDF5_DIR or pkg-config;
+                                           # an older HDF5: warning, build without HDF5); test: sh tests/openpmd.sh build-h5/gempic3d
 build/gempic3d examples/oblique_plane_wave.deck --check            # summary and memory estimate
 build/gempic3d examples/oblique_plane_wave.deck                    # run, results in oblique/
 build/gempic3d examples/oblique_plane_wave.deck laser.enabled=false output.dir=ref   # reference
@@ -571,6 +572,7 @@ diag.light {
 | chicane (frozen γ = 1000 bunch): change of E⊥, B⊥ by a delay of 20 k0⁻¹ against the change of the co-moving start field; R56 = 50 k0⁻¹ with 1 % spread: shift of every particle | 8e-8 (float output); 7e-15 |
 | checkpoint (plasma ramp, laser wake, mobile H⁺, ionizing N⁵⁺, bunch, moving window): 2 steps, checkpoint, restart, 2 steps against 4 steps; `tests/checkpoint.sh`: `--restart latest` from step 4 of 12 (1 and 2 ranks), wall-time stop | fields 5e-10 (thread sums), beam list and window exact; `diag.txt`, `ionization.txt` identical; exit code 3 |
 | GUI (`tests/gui.sh`): frames, cuts, 2 ranks = 1 rank, plasma frames | pass |
+| HDF5 check of the Makefile (`tests/hdf5_version.sh`, part of `make test`): `make -n HDF5=1` against stand-in installations: 1.10.6 = warning "too old (need 1.12 or newer)" and a build without HDF5; 1.14.6 serial = -DGEMPIC_HDF5, -lhdf5; parallel 1.12.0 = the MPI paths of mpicxx without MPI=1, none with MPI=1 | 13 of 13 checks |
 | LASY files (`type = file`, HDF5 build): cartesian file of the built-in Gaussian (a0 = 1, w = 12, τ = 25, `pol_angle` 0.3, `cep` 0.4) at its plane = built-in (start fields); `normalized_vector_potential` = `electric_field` of the same pulse; `a0` rescaling; thetaMode (C_0) = built-in (radial interpolation, dr = dx/4); thetaMode with m = 1 (cos, sin) = cartesian file of the same field; file at the focus with `file_z` = 3 z_R (k w = 6): envelope at z = 0 against an independent exact reference (Hankel transform per frequency); 20 steps in vacuum = built-in; CPU = RTX 5090 (CUDA build) | 1e-12; 2e-5; 0; 5e-4; 6e-4; 3e-5 (the paraxial one-frequency Gaussian differs by 5 %); 6e-12; same digits |
 | LASY file laser in `tests/mpi.deck` (a0 = 0.5, w = 40 µm, 0.16 ps, free-hand ζ): 2/3/4 ranks against 1 rank, CPU and CUDA + MPI builds; against the built-in Gaussian (τ interpolated between the file's samples on the free-hand ζ) | `diag.txt` identical; 1.3e-5 |
 | output groups and openPMD (`tests/openpmd.sh`): periods and selections of two groups, openPMD attributes and input deck, particles = native beam file, fields = native field file and axis file on a uniform grid | pass; 1.5e-7; exact; 1.5e-11 |

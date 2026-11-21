@@ -2,6 +2,9 @@
 // stencils. Included only by openpmd.cpp, inside #ifdef GEMPIC_HDF5.
 #pragma once
 #include <hdf5.h>
+#if !H5_VERSION_GE(1, 12, 0)
+#error "HDF5 1.12 or newer is required; the Makefile builds without HDF5 for an older one"
+#endif
 #include <algorithm>
 #include <cmath>
 #include <ctime>
