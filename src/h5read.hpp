@@ -8,6 +8,9 @@
 #pragma once
 #if defined(GEMPIC_HDF5)
 #include <hdf5.h>
+#if !H5_VERSION_GE(1, 12, 0)
+#error "HDF5 1.12 or newer is required; the Makefile builds without HDF5 for an older one"
+#endif
 
 #include <algorithm>
 #include <complex>
@@ -51,12 +54,8 @@ class File {
     }
   }
   bool isGroup(const std::string& p) const {
-    H5O_info_t info;
-#if H5_VERSION_GE(1, 12, 0)
+    H5O_info2_t info;  // HDF5 1.12 API
     if (H5Oget_info_by_name3(f, p.c_str(), &info, H5O_INFO_BASIC, H5P_DEFAULT) < 0) return false;
-#else
-    if (H5Oget_info_by_name(f, p.c_str(), &info, H5P_DEFAULT) < 0) return false;
-#endif
     return info.type == H5O_TYPE_GROUP;
   }
   bool hasAttr(const std::string& obj, const char* name) const {

@@ -39,7 +39,8 @@ and `mpirun --mca pml ob1 --mca btl self,vader` (the UCX layer crashes now and t
 files on atto go to /storage2/pukhov (builds and runs: /storage2/pukhov/g3d), never into the home directory.
 atto's `cp` is `cp -i`: use `\cp -f`. The atto nodes (Slurm partition `atto`, 24 cores) have no GPU.
 
-Container setup: `apt-get update && apt-get install -y libhdf5-dev pkg-config openmpi-bin libopenmpi-dev`,
+Container setup: `apt-get update && apt-get install -y libhdf5-dev pkg-config openmpi-bin libopenmpi-dev` (HDF5 1.12 or
+newer is required: Ubuntu 24.04 has 1.10, the Makefile then builds without HDF5; Ubuntu 25.04 / Debian 13 have 1.14),
 `pip install h5py numpy --break-system-packages`. Detached runs need `setsid nohup`.
 
 ## Code map
